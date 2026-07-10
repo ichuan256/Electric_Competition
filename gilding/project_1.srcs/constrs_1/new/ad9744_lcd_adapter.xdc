@@ -15,6 +15,9 @@ create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 set_property -dict {PACKAGE_PIN U18 IOSTANDARD LVCMOS33} [get_ports sys_clk]
 set_property -dict {PACKAGE_PIN N16 IOSTANDARD LVCMOS33} [get_ports sys_rst_n]
 
+# Board debug LED. LED0 is driven high to prove the programmed bitstream is new.
+set_property -dict {PACKAGE_PIN H15 IOSTANDARD LVCMOS33} [get_ports led0]
+
 # AD9744 control
 set_property -dict {PACKAGE_PIN Y17 IOSTANDARD LVCMOS33} [get_ports dac_sleep] ;# AD9744 PD/SLEEP
 set_property -dict {PACKAGE_PIN Y16 IOSTANDARD LVCMOS33} [get_ports dac_clk]   ;# AD9744 CLK

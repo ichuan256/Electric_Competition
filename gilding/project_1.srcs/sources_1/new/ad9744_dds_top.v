@@ -24,7 +24,8 @@ module ad9744_dds_top #(
 
     output wire        dac_clk,
     output wire [13:0] dac_data,
-    output wire        dac_sleep
+    output wire        dac_sleep,
+    output wire        led0
 );
 
     localparam [47:0] PHASE_INC =
@@ -73,6 +74,7 @@ module ad9744_dds_top #(
     assign dac_clk   = dac_clk_forwarded;
     assign dac_data  = dac_data_r;
     assign dac_sleep = 1'b0;
+    assign led0      = 1'b1;
 
     function [13:0] sine_lut_256;
         input [7:0] addr;
