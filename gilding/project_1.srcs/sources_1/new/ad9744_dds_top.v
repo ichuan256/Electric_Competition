@@ -1,7 +1,7 @@
 // AD9744 DDS output demo for ALIENTEK Navigator ZYNQ.
 //
 // Purpose:
-//   Generate a fixed 1 kHz sine wave for the external AD9744 14-bit DAC module.
+//   Generate a fixed 1 MHz sine wave for the external AD9744 14-bit DAC module.
 //
 // Hardware notes:
 //   The AD9744 module uses a 2x10 P1 header:
@@ -16,9 +16,9 @@
 
 module ad9744_dds_top #(
     parameter integer CLK_FREQ_HZ = 50_000_000,
-    parameter integer OUT_FREQ_HZ = 1_000,
+    parameter integer OUT_FREQ_HZ = 1_000_000,
     parameter integer AMPLITUDE    = 13'd4095,
-    parameter integer BIT_WEIGHT_TEST = 1
+    parameter integer BIT_WEIGHT_TEST = 0
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
