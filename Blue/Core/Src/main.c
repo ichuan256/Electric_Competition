@@ -34,6 +34,7 @@
 #include "SpectrumDisplay_User.h"
 #include "AGC_DAC_User.h"
 #include "LogDetector_User.h"
+#include "FpgaUart_User.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -167,6 +168,7 @@ int main(void)
   MX_GPIO_Init();
   MX_FMC_Init();
   MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   Delay_Init();
@@ -177,6 +179,7 @@ int main(void)
   LogDetector_Init();
   BoardComm_Init();
   (void)BoardComm_StartReceiveToIdleIT();
+  FpgaUart_Init();
 	
 	lcd_display_dir(1);
 	
@@ -193,6 +196,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     BoardComm_ProcessTask();
+    FpgaUart_Task();
     SpectrumDisplay_Task();
     HAL_Delay(10);
   }

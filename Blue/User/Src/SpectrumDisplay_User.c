@@ -4,12 +4,23 @@
 #include <string.h>
 #include "AGC_DAC_User.h"
 #include "BoardComm_User.h"
+#include "FpgaUart_User.h"
 #include "LogDetector_User.h"
 #include "lcd.h"
 #include "led.h"
 
-#define SPECTRUM_DISPLAY_LINE_COUNT 6U
+#define SPECTRUM_DISPLAY_LINE_COUNT 7U
 #define SPECTRUM_DISPLAY_LINE_LEN   40U
+#define SPECTRUM_DISPLAY_TEXT_X     10U
+#define SPECTRUM_DISPLAY_TEXT_W     300U
+#define SPECTRUM_DISPLAY_LINE_H     16U
+#define SPECTRUM_DISPLAY_UI_BOX_Y   120U
+#define SPECTRUM_DISPLAY_UI_BOX_W   94U
+#define SPECTRUM_DISPLAY_UI_BOX_H   42U
+#define SPECTRUM_DISPLAY_INFO_Y     170U
+#define SPECTRUM_DISPLAY_INFO_GAP   18U
+#define SPECTRUM_DISPLAY_GRAPH_Y    226U
+#define SPECTRUM_DISPLAY_GRAPH_H    80U
 
 static SpectrumDisplayState display_state;
 static uint16_t display_points_mv[SPECTRUM_DISPLAY_POINT_COUNT];
@@ -266,10 +277,10 @@ static uint32_t Spectrum_IndexToRfKHz(uint16_t index)
 
 static void Spectrum_DrawBars(void)
 {
-  uint16_t graph_x = 10;
-  uint16_t graph_y = 190;
+  uint16_t graph_x = SPECTRUM_DISPLAY_TEXT_X;
+  uint16_t graph_y = SPECTRUM_DISPLAY_GRAPH_Y;
   uint16_t graph_w = 300;
-  uint16_t graph_h = 80;
+  uint16_t graph_h = SPECTRUM_DISPLAY_GRAPH_H;
   uint16_t max_mv = display_state.peak_amplitude_mv;
   uint16_t point_count = display_state.active_point_count;
 
@@ -318,8 +329,9 @@ static void Spectrum_ShowLine(uint8_t line_index, uint16_t y, const char *text)
   if ((display_force_refresh != 0U) ||
       (strncmp(display_last_lines[line_index], text, SPECTRUM_DISPLAY_LINE_LEN) != 0))
   {
-    lcd_fill(10, y, 319, (uint16_t)(y + 15U), WHITE);
-    lcd_show_string(10, y, 300, 16, 16, (char *)text, BLACK);
+    lcd_fill(SPECTRUM_DISPLAY_TEXT_X, y, 319, (uint16_t)(y + SPECTRUM_DISPLAY_LINE_H - 1U), WHITE);
+    lcd_show_string(SPECTRUM_DISPLAY_TEXT_X, y, SPECTRUM_DISPLAY_TEXT_W,
+                    SPECTRUM_DISPLAY_LINE_H, SPECTRUM_DISPLAY_LINE_H, (char *)text, BLACK);
     strncpy(display_last_lines[line_index], text, SPECTRUM_DISPLAY_LINE_LEN - 1U);
     display_last_lines[line_index][SPECTRUM_DISPLAY_LINE_LEN - 1U] = '\0';
   }
@@ -327,9 +339,9 @@ static void Spectrum_ShowLine(uint8_t line_index, uint16_t y, const char *text)
 
 static void Spectrum_DrawUiBoxes(void)
 {
-  const uint16_t box_y = 122U;
-  const uint16_t box_w = 94U;
-  const uint16_t box_h = 34U;
+  const uint16_t box_y = SPECTRUM_DISPLAY_UI_BOX_Y;
+  const uint16_t box_w = SPECTRUM_DISPLAY_UI_BOX_W;
+  const uint16_t box_h = SPECTRUM_DISPLAY_UI_BOX_H;
   const uint16_t box_x[3] = {10U, 113U, 216U};
   char value[16];
 
@@ -357,8 +369,8 @@ static void Spectrum_DrawUiBoxes(void)
                          (uint16_t)(box_y + box_h - 1U), border);
     }
 
-    lcd_show_string((uint16_t)(box_x[field] + 4U), (uint16_t)(box_y + 2U),
-                    (uint16_t)(box_w - 8U), 16, 16,
+    lcd_show_string((uint16_t)(box_x[field] + 6U), (uint16_t)(box_y + 6U),
+                    (uint16_t)(box_w - 12U), 16, 16,
                     (char *)Spectrum_UiFieldText(field), color);
     if ((selected != 0U) && (display_state.ui_editing != 0U))
     {
@@ -368,14 +380,15 @@ static void Spectrum_DrawUiBoxes(void)
     {
       Spectrum_FormatFieldValue(field, value, sizeof(value));
     }
-    lcd_show_string((uint16_t)(box_x[field] + 4U), (uint16_t)(box_y + 18U),
-                    (uint16_t)(box_w - 8U), 16, 16, value, color);
+    lcd_show_string((uint16_t)(box_x[field] + 6U), (uint16_t)(box_y + 24U),
+                    (uint16_t)(box_w - 12U), 16, 16, value, color);
   }
 }
 
 static void Spectrum_RefreshLcd(void)
 {
   char line[40];
+  FpgaUartState fpga_state = FpgaUart_GetState();
   uint32_t peak_rf_khz = Spectrum_IndexToRfKHz(display_state.peak_index);
   uint16_t sweep_ms = display_state.ui_sweep_time_ms;
 
@@ -420,30 +433,42 @@ static void Spectrum_RefreshLcd(void)
   {
     sprintf(line, "PEAK:%3lu.%03luMHz %4umV", peak_rf_khz / 1000UL,
             peak_rf_khz % 1000UL, display_state.peak_amplitude_mv);
-    Spectrum_ShowLine(4, 162, line);
+    Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
   }
   else if (display_state.ui_editing != 0U)
   {
     char edit_text[12];
     Spectrum_FormatEditText(edit_text, sizeof(edit_text));
     sprintf(line, "EDIT:%-9s         D=OK", edit_text);
-    Spectrum_ShowLine(4, 162, line);
+    Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
   }
   else if (display_state.mode == 3U)
   {
     sprintf(line, "LOCK DEMO: no editable value");
-    Spectrum_ShowLine(4, 162, line);
+    Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
   }
   else
   {
     sprintf(line, "SEL:%-4s  2/4< >6/8  D=EDIT",
             Spectrum_UiFieldText(display_state.ui_focus));
-    Spectrum_ShowLine(4, 162, line);
+    Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
   }
 
   sprintf(line, "RX:%u ERR:%u SZ:%u", (unsigned int)display_state.rx_count,
           (unsigned int)display_state.error_count, display_last_rx_size);
-  Spectrum_ShowLine(5, 174, line);
+  Spectrum_ShowLine(5, SPECTRUM_DISPLAY_INFO_Y + SPECTRUM_DISPLAY_INFO_GAP, line);
+
+  if (fpga_state.has_rx != 0U)
+  {
+    sprintf(line, "FPGA TX:%3u RX:%3u  C:%u",
+            fpga_state.last_tx_value, fpga_state.rx_value, (unsigned int)fpga_state.rx_count);
+  }
+  else
+  {
+    sprintf(line, "FPGA TX:%3u RX:---  C:%u",
+            fpga_state.last_tx_value, (unsigned int)fpga_state.rx_count);
+  }
+  Spectrum_ShowLine(6, SPECTRUM_DISPLAY_INFO_Y + (SPECTRUM_DISPLAY_INFO_GAP * 2U), line);
 
   Spectrum_DrawUiBoxes();
 
