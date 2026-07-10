@@ -18,7 +18,7 @@ module ad9744_dds_top #(
     parameter integer CLK_FREQ_HZ = 50_000_000,
     parameter integer OUT_FREQ_HZ = 1_000,
     parameter integer AMPLITUDE    = 13'd4095,
-    parameter integer BIT_WEIGHT_TEST = 0
+    parameter integer BIT_WEIGHT_TEST = 1
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -85,7 +85,13 @@ module ad9744_dds_top #(
                 bit_hold_cnt <= bit_hold_cnt + 26'd1;
             end
 
-            bit_test_data_r <= bit_test_square ? (14'd1 << bit_test_index) : 14'd0;
+            if (bit_test_index == 4'd13) begin
+                bit_test_data_r <= bit_test_square ? 14'h3FFF : 14'h0000;
+            end else begin
+                bit_test_data_r <= bit_test_square
+                    ? (14'h2000 + (14'd1 << bit_test_index))
+                    : (14'h2000 - (14'd1 << bit_test_index));
+            end
         end
     end
 
