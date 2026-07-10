@@ -1,0 +1,29 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file    usart.h
+  * @brief   This file contains all the function prototypes for
+  *          the usart.c file
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+#ifndef __USART_H__
+#define __USART_H__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "main.h"
+
+extern UART_HandleTypeDef huart3;
+
+/* USART3 用作板间通信串口：PB10=TX，PB11=RX，115200-8N1。 */
+void MX_USART3_UART_Init(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -1,0 +1,29 @@
+# CubeMX temp
+.mxproject
+
+# Keil build output
+MDK-ARM/Black/
+MDK-ARM/*.uvguix.*
+MDK-ARM/*_build.log
+MDK-ARM/startup_stm32h750xx.lst
+
+# Keil user options
+*.uvoptx
+
+# Debug
+DebugConfig/
+*.scvd
+*.dbgconf
+
+# RTE
+RTE/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
