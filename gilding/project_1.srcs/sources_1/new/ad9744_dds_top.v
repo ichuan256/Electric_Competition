@@ -98,7 +98,7 @@ module ad9744_dds_top #(
                 3'd2: bit_test_data_r <= 14'h2000;
                 3'd3: bit_test_data_r <= 14'h3000;
                 default: bit_test_data_r <= 14'h3FFF;
-            end
+            endcase
         end
     end
 
