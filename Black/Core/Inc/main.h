@@ -93,7 +93,7 @@ void Error_Handler(void);
 #define KEY_ROW1_GPIO_Port GPIOC
 #define KEY_ROW2_Pin GPIO_PIN_8
 #define KEY_ROW2_GPIO_Port GPIOC
-#define KEY_ROW3_Pin GPIO_PIN_3
+#define KEY_ROW3_Pin GPIO_PIN_9
 #define KEY_ROW3_GPIO_Port GPIOC
 #define KEY_COL0_Pin GPIO_PIN_4
 #define KEY_COL0_GPIO_Port GPIOC
