@@ -17,7 +17,8 @@
 module ad9744_dds_top #(
     parameter integer CLK_FREQ_HZ = 50_000_000,
     parameter integer OUT_FREQ_HZ = 1_000,
-    parameter integer AMPLITUDE    = 13'd4095
+    parameter integer AMPLITUDE    = 13'd4095,
+    parameter integer BIT_WEIGHT_TEST = 1
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -36,6 +37,11 @@ module ad9744_dds_top #(
     reg signed [14:0] wave_signed;
     reg signed [28:0] scaled_signed;
     reg [13:0] dac_data_r;
+    reg [13:0] bit_test_data_r;
+    reg [25:0] bit_hold_cnt;
+    reg [15:0] bit_toggle_cnt;
+    reg [3:0] bit_test_index;
+    reg bit_test_square;
 
     wire [7:0] phase_index = phase_acc[47:40];
     wire [13:0] sine_sample = sine_lut_256(phase_index);
@@ -50,12 +56,36 @@ module ad9744_dds_top #(
             wave_signed        <= 15'sd0;
             scaled_signed      <= 29'sd0;
             dac_data_r         <= 14'd8192;
+            bit_test_data_r    <= 14'd0;
+            bit_hold_cnt       <= 26'd0;
+            bit_toggle_cnt     <= 16'd0;
+            bit_test_index     <= 4'd13;
+            bit_test_square    <= 1'b0;
         end else begin
             phase_acc          <= phase_acc + PHASE_INC;
             wave_offset_binary <= sine_sample;
             wave_signed        <= $signed({1'b0, sine_sample}) - 15'sd8192;
             scaled_signed      <= wave_signed * $signed({1'b0, AMPLITUDE});
             dac_data_r         <= dac_sum[13:0];
+
+            if (bit_toggle_cnt == ((CLK_FREQ_HZ / (OUT_FREQ_HZ * 2)) - 1)) begin
+                bit_toggle_cnt  <= 16'd0;
+                bit_test_square <= ~bit_test_square;
+            end else begin
+                bit_toggle_cnt <= bit_toggle_cnt + 16'd1;
+            end
+
+            if (bit_hold_cnt == (CLK_FREQ_HZ - 1)) begin
+                bit_hold_cnt <= 26'd0;
+                if (bit_test_index == 4'd0)
+                    bit_test_index <= 4'd13;
+                else
+                    bit_test_index <= bit_test_index - 4'd1;
+            end else begin
+                bit_hold_cnt <= bit_hold_cnt + 26'd1;
+            end
+
+            bit_test_data_r <= bit_test_square ? (14'd1 << bit_test_index) : 14'd0;
         end
     end
 
@@ -74,7 +104,7 @@ module ad9744_dds_top #(
     );
 
     assign dac_clk   = dac_clk_forwarded;
-    assign dac_data  = dac_data_r;
+    assign dac_data  = (BIT_WEIGHT_TEST != 0) ? bit_test_data_r : dac_data_r;
     assign dac_sleep = 1'b0;
     assign led0      = 1'b1;
 
