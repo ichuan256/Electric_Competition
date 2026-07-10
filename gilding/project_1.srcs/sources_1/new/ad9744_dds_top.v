@@ -39,6 +39,8 @@ module ad9744_dds_top #(
 
     wire [7:0] phase_index = phase_acc[47:40];
     wire [13:0] sine_sample = sine_lut_256(phase_index);
+    wire signed [14:0] scaled_offset = scaled_signed >>> 13;
+    wire signed [15:0] dac_sum = 16'sd8192 + scaled_offset;
     wire dac_clk_forwarded;
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
@@ -53,7 +55,7 @@ module ad9744_dds_top #(
             wave_offset_binary <= sine_sample;
             wave_signed        <= $signed({1'b0, sine_sample}) - 15'sd8192;
             scaled_signed      <= wave_signed * $signed({1'b0, AMPLITUDE});
-            dac_data_r         <= 14'd8192 + scaled_signed[25:13];
+            dac_data_r         <= dac_sum[13:0];
         end
     end
 
