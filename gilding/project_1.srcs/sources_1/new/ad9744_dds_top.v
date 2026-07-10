@@ -41,6 +41,7 @@ module ad9744_dds_top #(
     reg [25:0] bit_hold_cnt;
     reg [15:0] bit_toggle_cnt;
     reg [3:0] bit_test_index;
+    reg [2:0] stair_test_index;
     reg bit_test_square;
 
     wire [7:0] phase_index = phase_acc[47:40];
@@ -60,6 +61,7 @@ module ad9744_dds_top #(
             bit_hold_cnt       <= 26'd0;
             bit_toggle_cnt     <= 16'd0;
             bit_test_index     <= 4'd13;
+            stair_test_index   <= 3'd0;
             bit_test_square    <= 1'b0;
         end else begin
             phase_acc          <= phase_acc + PHASE_INC;
@@ -81,16 +83,21 @@ module ad9744_dds_top #(
                     bit_test_index <= 4'd13;
                 else
                     bit_test_index <= bit_test_index - 4'd1;
+
+                if (stair_test_index == 3'd4)
+                    stair_test_index <= 3'd0;
+                else
+                    stair_test_index <= stair_test_index + 3'd1;
             end else begin
                 bit_hold_cnt <= bit_hold_cnt + 26'd1;
             end
 
-            if (bit_test_index == 4'd13) begin
-                bit_test_data_r <= bit_test_square ? 14'h3FFF : 14'h0000;
-            end else begin
-                bit_test_data_r <= bit_test_square
-                    ? (14'h2000 + (14'd1 << bit_test_index))
-                    : (14'h2000 - (14'd1 << bit_test_index));
+            case (stair_test_index)
+                3'd0: bit_test_data_r <= 14'h0000;
+                3'd1: bit_test_data_r <= 14'h1000;
+                3'd2: bit_test_data_r <= 14'h2000;
+                3'd3: bit_test_data_r <= 14'h3000;
+                default: bit_test_data_r <= 14'h3FFF;
             end
         end
     end
