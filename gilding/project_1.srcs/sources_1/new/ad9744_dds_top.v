@@ -18,7 +18,7 @@ module ad9744_dds_top #(
     parameter integer CLK_FREQ_HZ = 50_000_000,
     parameter integer OUT_FREQ_HZ = 1_000,
     parameter integer AMPLITUDE    = 13'd4095,
-    parameter integer BIT_WEIGHT_TEST = 1
+    parameter integer BIT_WEIGHT_TEST = 0
 )(
     input  wire        sys_clk,
     input  wire        sys_rst_n,
@@ -66,7 +66,7 @@ module ad9744_dds_top #(
             wave_offset_binary <= sine_sample;
             wave_signed        <= $signed({1'b0, sine_sample}) - 15'sd8192;
             scaled_signed      <= wave_signed * $signed({1'b0, AMPLITUDE});
-            dac_data_r         <= dac_sum[13:0];
+            dac_data_r         <= 14'h3FFF - dac_sum[13:0];
 
             if (bit_toggle_cnt == ((CLK_FREQ_HZ / (OUT_FREQ_HZ * 2)) - 1)) begin
                 bit_toggle_cnt  <= 16'd0;
