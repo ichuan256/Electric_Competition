@@ -8,7 +8,7 @@
 #include "lcd.h"
 #include "led.h"
 
-#define SPECTRUM_DISPLAY_LINE_COUNT 7U
+#define SPECTRUM_DISPLAY_LINE_COUNT 6U
 #define SPECTRUM_DISPLAY_LINE_LEN   40U
 
 static SpectrumDisplayState display_state;
@@ -79,6 +79,77 @@ static const char *Spectrum_UiFieldText(uint8_t focus)
     case 2U: return "FREQ";
     default: return "?";
   }
+}
+
+static uint8_t Spectrum_DisplayFieldEditable(uint8_t mode, uint8_t field)
+{
+  if (mode == 0U)
+  {
+    return (field == 0U) ? 1U : 0U;
+  }
+  if (mode == 1U)
+  {
+    return ((field == 0U) || (field == 1U)) ? 1U : 0U;
+  }
+  if (mode == 2U)
+  {
+    return ((field == 1U) || (field == 2U)) ? 1U : 0U;
+  }
+
+  return 0U;
+}
+
+static void Spectrum_FormatFieldValue(uint8_t field, char *text, uint8_t text_len)
+{
+  uint16_t sweep_ms = display_state.ui_sweep_time_ms;
+
+  if ((text == 0) || (text_len == 0U))
+  {
+    return;
+  }
+
+  if (sweep_ms == 0U)
+  {
+    sweep_ms = (uint16_t)display_state.sweep_time_s * 1000U;
+  }
+
+  if (field == 0U)
+  {
+    snprintf(text, text_len, "%u.%03us", sweep_ms / 1000U, sweep_ms % 1000U);
+  }
+  else if (field == 1U)
+  {
+    snprintf(text, text_len, "%umV", display_state.agc_target_mv);
+  }
+  else
+  {
+    snprintf(text, text_len, "%lu.%03luM",
+             display_state.fixed_frequency_khz / 1000UL,
+             display_state.fixed_frequency_khz % 1000UL);
+  }
+}
+
+static void Spectrum_FormatEditText(char *text, uint8_t text_len)
+{
+  uint8_t len;
+
+  if ((text == 0) || (text_len == 0U))
+  {
+    return;
+  }
+
+  len = display_state.ui_input_len;
+  if (len > (uint8_t)(text_len - 1U))
+  {
+    len = (uint8_t)(text_len - 1U);
+  }
+
+  memcpy(text, display_state.ui_input, len);
+  if (len < (uint8_t)(text_len - 1U))
+  {
+    text[len++] = '|';
+  }
+  text[len] = '\0';
 }
 
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
@@ -196,9 +267,9 @@ static uint32_t Spectrum_IndexToRfKHz(uint16_t index)
 static void Spectrum_DrawBars(void)
 {
   uint16_t graph_x = 10;
-  uint16_t graph_y = 180;
+  uint16_t graph_y = 190;
   uint16_t graph_w = 300;
-  uint16_t graph_h = 90;
+  uint16_t graph_h = 80;
   uint16_t max_mv = display_state.peak_amplitude_mv;
   uint16_t point_count = display_state.active_point_count;
 
@@ -254,6 +325,54 @@ static void Spectrum_ShowLine(uint8_t line_index, uint16_t y, const char *text)
   }
 }
 
+static void Spectrum_DrawUiBoxes(void)
+{
+  const uint16_t box_y = 122U;
+  const uint16_t box_w = 94U;
+  const uint16_t box_h = 34U;
+  const uint16_t box_x[3] = {10U, 113U, 216U};
+  char value[16];
+
+  lcd_fill(10, box_y, 319, (uint16_t)(box_y + box_h), WHITE);
+
+  for (uint8_t field = 0U; field < 3U; field++)
+  {
+    uint8_t editable = Spectrum_DisplayFieldEditable(display_state.mode, field);
+    uint8_t selected = ((display_state.ui_focus == field) && (editable != 0U)) ? 1U : 0U;
+    uint16_t color = (editable != 0U) ? BLACK : GRAY;
+    uint16_t border = (editable != 0U) ? LGRAYBLUE : LGRAY;
+
+    if (selected != 0U)
+    {
+      border = (display_state.ui_editing != 0U) ? RED : BLUE;
+    }
+
+    lcd_draw_rectangle(box_x[field], box_y,
+                       (uint16_t)(box_x[field] + box_w),
+                       (uint16_t)(box_y + box_h), border);
+    if (selected != 0U)
+    {
+      lcd_draw_rectangle((uint16_t)(box_x[field] + 1U), (uint16_t)(box_y + 1U),
+                         (uint16_t)(box_x[field] + box_w - 1U),
+                         (uint16_t)(box_y + box_h - 1U), border);
+    }
+
+    lcd_show_string((uint16_t)(box_x[field] + 4U), (uint16_t)(box_y + 2U),
+                    (uint16_t)(box_w - 8U), 16, 16,
+                    (char *)Spectrum_UiFieldText(field), color);
+    if ((selected != 0U) && (display_state.ui_editing != 0U))
+    {
+      Spectrum_FormatEditText(value, sizeof(value));
+    }
+    else
+    {
+      Spectrum_FormatFieldValue(field, value, sizeof(value));
+    }
+    lcd_show_string((uint16_t)(box_x[field] + 4U), (uint16_t)(box_y + 18U),
+                    (uint16_t)(box_w - 8U), 16, 16, value, color);
+  }
+}
+
 static void Spectrum_RefreshLcd(void)
 {
   char line[40];
@@ -270,64 +389,63 @@ static void Spectrum_RefreshLcd(void)
     lcd_show_string(10, 10, 300, 24, 24, "RF CONTROL", RED);
   }
 
-  sprintf(line, "%s %s T:%u.%03us", Spectrum_ModeText(display_state.mode),
-          Spectrum_StateText(display_state.state), sweep_ms / 1000U, sweep_ms % 1000U);
-  Spectrum_ShowLine(0, 45, line);
+  sprintf(line, "MODE:%-9s STATE:%-4s", Spectrum_ModeText(display_state.mode),
+          Spectrum_StateText(display_state.state));
+  Spectrum_ShowLine(0, 42, line);
 
-  sprintf(line, "RF:%lu.%03luMHz", display_state.rf_khz / 1000UL, display_state.rf_khz % 1000UL);
-  Spectrum_ShowLine(1, 65, line);
+  sprintf(line, "RF  :%3lu.%03luMHz  LO:%3lu.%03luMHz",
+          display_state.rf_khz / 1000UL, display_state.rf_khz % 1000UL,
+          display_state.lo_khz / 1000UL, display_state.lo_khz % 1000UL);
+  Spectrum_ShowLine(1, 62, line);
 
-  sprintf(line, "LO:%lu.%03luMHz LOCK:%u", display_state.lo_khz / 1000UL, display_state.lo_khz % 1000UL, display_state.pll_locked);
-  Spectrum_ShowLine(2, 85, line);
-
-  if (display_state.mode == 3U)
-  {
-    sprintf(line, "PERIOD:0.5s STEP:%u/2", display_state.point_index + 1U);
-  }
-  else
-  {
-    sprintf(line, "P:%u/%u ADC:%umV", display_state.point_index + 1U,
-            display_state.active_point_count, display_detector_sample.mv);
-  }
-  Spectrum_ShowLine(3, 105, line);
-
-  if (display_state.mode == 0U)
-  {
-    sprintf(line, "PEAK:%lu.%03luMHz %umV", peak_rf_khz / 1000UL,
-            peak_rf_khz % 1000UL, display_state.peak_amplitude_mv);
-  }
-  else if (display_state.ui_focus == 0U)
-  {
-    sprintf(line, "BOX:%s %u.%03us", Spectrum_UiFieldText(display_state.ui_focus),
-            sweep_ms / 1000U, sweep_ms % 1000U);
-  }
-  else if (display_state.ui_focus == 1U)
-  {
-    sprintf(line, "BOX:%s %umV", Spectrum_UiFieldText(display_state.ui_focus),
-            display_state.agc_target_mv);
-  }
-  else
-  {
-    sprintf(line, "BOX:%s %lu.%03luMHz", Spectrum_UiFieldText(display_state.ui_focus),
-            display_state.fixed_frequency_khz / 1000UL, display_state.fixed_frequency_khz % 1000UL);
-  }
-  Spectrum_ShowLine(4, 125, line);
-
-  if (display_state.ui_editing != 0U)
-  {
-    sprintf(line, "EDIT:%s  D=OK", display_state.ui_input);
-  }
-  else
-  {
-    sprintf(line, "SEL:%s 2468 D=EDIT", Spectrum_UiFieldText(display_state.ui_focus));
-  }
-  Spectrum_ShowLine(5, 145, line);
-
-  sprintf(line, "KEY:%c SPUR:%u DBM:%d.%d", display_state.last_key, display_state.spur_count,
+  sprintf(line, "LOCK:%u ADC:%4umV DBM:%d.%d", display_state.pll_locked,
+          display_detector_sample.mv,
           display_detector_sample.dbm_x10 / 10,
           (display_detector_sample.dbm_x10 < 0) ? (int)(-display_detector_sample.dbm_x10 % 10)
                                                 : (int)(display_detector_sample.dbm_x10 % 10));
-  Spectrum_ShowLine(6, 165, line);
+  Spectrum_ShowLine(2, 82, line);
+
+  if (display_state.mode == 3U)
+  {
+    sprintf(line, "STEP:%3u/2   PERIOD:0.5s", display_state.point_index + 1U);
+  }
+  else
+  {
+    sprintf(line, "POINT:%3u/%3u SPUR:%3u KEY:%c", display_state.point_index + 1U,
+            display_state.active_point_count, display_state.spur_count, display_state.last_key);
+  }
+  Spectrum_ShowLine(3, 102, line);
+
+  if (display_state.mode == 0U)
+  {
+    sprintf(line, "PEAK:%3lu.%03luMHz %4umV", peak_rf_khz / 1000UL,
+            peak_rf_khz % 1000UL, display_state.peak_amplitude_mv);
+    Spectrum_ShowLine(4, 162, line);
+  }
+  else if (display_state.ui_editing != 0U)
+  {
+    char edit_text[12];
+    Spectrum_FormatEditText(edit_text, sizeof(edit_text));
+    sprintf(line, "EDIT:%-9s         D=OK", edit_text);
+    Spectrum_ShowLine(4, 162, line);
+  }
+  else if (display_state.mode == 3U)
+  {
+    sprintf(line, "LOCK DEMO: no editable value");
+    Spectrum_ShowLine(4, 162, line);
+  }
+  else
+  {
+    sprintf(line, "SEL:%-4s  2/4< >6/8  D=EDIT",
+            Spectrum_UiFieldText(display_state.ui_focus));
+    Spectrum_ShowLine(4, 162, line);
+  }
+
+  sprintf(line, "RX:%u ERR:%u SZ:%u", (unsigned int)display_state.rx_count,
+          (unsigned int)display_state.error_count, display_last_rx_size);
+  Spectrum_ShowLine(5, 174, line);
+
+  Spectrum_DrawUiBoxes();
 
   if ((display_force_refresh != 0U) || (display_graph_dirty != 0U))
   {

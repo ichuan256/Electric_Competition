@@ -33,7 +33,11 @@ volatile uint32_t Spectrum_Debug_AdcTimeoutCount = 0U;
 volatile uint16_t Spectrum_Debug_LastAdcMv = 0U;
 
 static void Spectrum_StartPllSweep(void);
+static void Spectrum_StartAnalyzer(void);
+static void Spectrum_EnterFixedMode(void);
+static void Spectrum_EnterLockDemoMode(void);
 static void Spectrum_SetPllFrequency(uint32_t frequency_khz, uint16_t point_index);
+static void Spectrum_UiCancelEdit(void);
 
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 {
@@ -62,6 +66,62 @@ static uint8_t Spectrum_IsDigit(char key)
   return ((key >= '0') && (key <= '9')) ? 1U : 0U;
 }
 
+static uint8_t Spectrum_UiFieldEditable(SpectrumMode mode, uint8_t field)
+{
+  if (mode == SPECTRUM_MODE_ANALYZER)
+  {
+    return (field == SPECTRUM_UI_FIELD_SWEEP_TIME) ? 1U : 0U;
+  }
+  if (mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
+  {
+    return ((field == SPECTRUM_UI_FIELD_SWEEP_TIME) ||
+            (field == SPECTRUM_UI_FIELD_OUTPUT_MV)) ? 1U : 0U;
+  }
+  if (mode == SPECTRUM_MODE_PLL_FIXED_AGC)
+  {
+    return ((field == SPECTRUM_UI_FIELD_OUTPUT_MV) ||
+            (field == SPECTRUM_UI_FIELD_FIXED_FREQ)) ? 1U : 0U;
+  }
+
+  return 0U;
+}
+
+static uint8_t Spectrum_UiHasEditableField(SpectrumMode mode)
+{
+  for (uint8_t field = 0U; field < (uint8_t)SPECTRUM_UI_FIELD_COUNT; field++)
+  {
+    if (Spectrum_UiFieldEditable(mode, field) != 0U)
+    {
+      return 1U;
+    }
+  }
+  return 0U;
+}
+
+static void Spectrum_UiNormalizeFocus(void)
+{
+  if (Spectrum_UiHasEditableField(spectrum_snapshot.mode) == 0U)
+  {
+    spectrum_snapshot.ui_focus = (uint8_t)SPECTRUM_UI_FIELD_COUNT;
+    Spectrum_UiCancelEdit();
+    return;
+  }
+
+  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) != 0U)
+  {
+    return;
+  }
+
+  for (uint8_t field = 0U; field < (uint8_t)SPECTRUM_UI_FIELD_COUNT; field++)
+  {
+    if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, field) != 0U)
+    {
+      spectrum_snapshot.ui_focus = field;
+      return;
+    }
+  }
+}
+
 static void Spectrum_UiClearInput(void)
 {
   spectrum_snapshot.ui_input_len = 0U;
@@ -70,6 +130,11 @@ static void Spectrum_UiClearInput(void)
 
 static void Spectrum_UiStartEdit(void)
 {
+  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
+  {
+    return;
+  }
+
   spectrum_snapshot.ui_editing = 1U;
   Spectrum_UiClearInput();
 }
@@ -80,18 +145,6 @@ static void Spectrum_UiCancelEdit(void)
   Spectrum_UiClearInput();
 }
 
-static uint8_t Spectrum_UiInputHasDecimal(void)
-{
-  for (uint8_t i = 0U; i < spectrum_snapshot.ui_input_len; i++)
-  {
-    if (spectrum_snapshot.ui_input[i] == '.')
-    {
-      return 1U;
-    }
-  }
-  return 0U;
-}
-
 static void Spectrum_UiAppendInput(char key)
 {
   if (spectrum_snapshot.ui_input_len >= SPECTRUM_UI_INPUT_MAX_LEN)
@@ -99,15 +152,7 @@ static void Spectrum_UiAppendInput(char key)
     return;
   }
 
-  if (key == '#')
-  {
-    if (Spectrum_UiInputHasDecimal() != 0U)
-    {
-      return;
-    }
-    key = '.';
-  }
-  else if (Spectrum_IsDigit(key) == 0U)
+  if (Spectrum_IsDigit(key) == 0U)
   {
     return;
   }
@@ -195,16 +240,35 @@ static uint32_t Spectrum_UiParseInputX1000(uint8_t *valid, uint8_t *has_decimal)
 
 static void Spectrum_UiMoveFocus(int8_t step)
 {
-  int8_t focus = (int8_t)spectrum_snapshot.ui_focus + step;
+  int8_t focus;
 
-  if (focus < 0)
+  if (Spectrum_UiHasEditableField(spectrum_snapshot.mode) == 0U)
   {
-    focus = (int8_t)SPECTRUM_UI_FIELD_COUNT - 1;
+    spectrum_snapshot.ui_focus = (uint8_t)SPECTRUM_UI_FIELD_COUNT;
+    Spectrum_UiCancelEdit();
+    return;
   }
-  else if (focus >= (int8_t)SPECTRUM_UI_FIELD_COUNT)
+
+  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
   {
-    focus = 0;
+    Spectrum_UiNormalizeFocus();
+    return;
   }
+
+  focus = (int8_t)spectrum_snapshot.ui_focus;
+
+  do
+  {
+    focus += step;
+    if (focus < 0)
+    {
+      focus = (int8_t)SPECTRUM_UI_FIELD_COUNT - 1;
+    }
+    else if (focus >= (int8_t)SPECTRUM_UI_FIELD_COUNT)
+    {
+      focus = 0;
+    }
+  } while (Spectrum_UiFieldEditable(spectrum_snapshot.mode, (uint8_t)focus) == 0U);
 
   spectrum_snapshot.ui_focus = (uint8_t)focus;
 }
@@ -225,25 +289,48 @@ static void Spectrum_SetSweepTimeMs(uint32_t sweep_time_ms)
   spectrum_snapshot.ui_sweep_time_ms = (uint16_t)sweep_time_ms;
 }
 
+static void Spectrum_RestartCurrentMode(void)
+{
+  if (spectrum_snapshot.mode == SPECTRUM_MODE_ANALYZER)
+  {
+    Spectrum_StartAnalyzer();
+  }
+  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
+  {
+    Spectrum_StartPllSweep();
+  }
+  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_FIXED_AGC)
+  {
+    Spectrum_EnterFixedMode();
+  }
+  else
+  {
+    Spectrum_EnterLockDemoMode();
+  }
+}
+
 static void Spectrum_UiCommitInput(void)
 {
   uint8_t valid;
   uint8_t has_decimal;
   uint32_t value_x1000 = Spectrum_UiParseInputX1000(&valid, &has_decimal);
 
+  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
+  {
+    Spectrum_UiCancelEdit();
+    return;
+  }
+
   if (valid == 0U)
   {
     Spectrum_UiCancelEdit();
+    Spectrum_RestartCurrentMode();
     return;
   }
 
   if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_SWEEP_TIME)
   {
     Spectrum_SetSweepTimeMs(value_x1000);
-    if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
-    {
-      Spectrum_StartPllSweep();
-    }
   }
   else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_OUTPUT_MV)
   {
@@ -281,13 +368,10 @@ static void Spectrum_UiCommitInput(void)
     }
 
     spectrum_snapshot.fixed_frequency_khz = frequency_khz;
-    if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_FIXED_AGC)
-    {
-      Spectrum_SetPllFrequency(frequency_khz, 0U);
-    }
   }
 
   Spectrum_UiCancelEdit();
+  Spectrum_RestartCurrentMode();
 }
 
 static uint32_t Spectrum_AnalyzerIndexToRfKHz(uint16_t index)
@@ -447,6 +531,7 @@ static void Spectrum_StartAnalyzer(void)
   }
 
   spectrum_snapshot.mode = SPECTRUM_MODE_ANALYZER;
+  Spectrum_UiNormalizeFocus();
   spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
   spectrum_snapshot.active_point_count = SPECTRUM_POINT_COUNT;
   spectrum_snapshot.point_index = 0U;
@@ -463,6 +548,7 @@ static void Spectrum_StartAnalyzer(void)
 static void Spectrum_StartPllSweep(void)
 {
   spectrum_snapshot.mode = SPECTRUM_MODE_PLL_SWEEP_AGC;
+  Spectrum_UiNormalizeFocus();
   spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
   spectrum_snapshot.active_point_count = PLL_SWEEP_POINT_COUNT;
   spectrum_snapshot.point_index = 0U;
@@ -480,6 +566,7 @@ static void Spectrum_StartPllSweep(void)
 static void Spectrum_EnterFixedMode(void)
 {
   spectrum_snapshot.mode = SPECTRUM_MODE_PLL_FIXED_AGC;
+  Spectrum_UiNormalizeFocus();
   spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
   spectrum_snapshot.active_point_count = 1U;
   spectrum_snapshot.point_index = 0U;
@@ -493,6 +580,7 @@ static void Spectrum_EnterFixedMode(void)
 static void Spectrum_EnterLockDemoMode(void)
 {
   spectrum_snapshot.mode = SPECTRUM_MODE_PLL_LOCK_DEMO;
+  Spectrum_UiNormalizeFocus();
   spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
   spectrum_snapshot.active_point_count = 2U;
   spectrum_snapshot.point_index = 0U;
@@ -769,7 +857,7 @@ void SpectrumSystem_OnKey(char key)
     {
       Spectrum_UiClearInput();
     }
-    else if (key == '*')
+    else if ((key == '*') || (key == '#'))
     {
       Spectrum_UiBackspace();
     }
@@ -808,16 +896,6 @@ void SpectrumSystem_OnKey(char key)
   else if (key == 'D')
   {
     Spectrum_UiStartEdit();
-  }
-  else if (Spectrum_IsDigit(key) != 0U)
-  {
-    Spectrum_UiStartEdit();
-    Spectrum_UiAppendInput(key);
-  }
-  else if (key == '#')
-  {
-    Spectrum_UiStartEdit();
-    Spectrum_UiAppendInput(key);
   }
 
   Spectrum_UpdateAgcSnapshot();
