@@ -11,8 +11,8 @@ This Vivado project contains a first-pass FPGA-only AD9744 DDS demo.
   - Uses no manually-created Vivado IP.
 
 - `project_1.srcs/constrs_1/new/ad9744_lcd_adapter.xdc`
-  - Maps the AD9744 digital bus to the Navigator ZYNQ RGB LCD connector signal area.
-  - Keeps the data lines grouped on LCD RGB pins.
+  - Maps the AD9744 digital bus to the user-confirmed FPGA pins.
+  - Keeps the data lines in the physical AD9744 order: `D2,D1,D4,D3,...D14,D13,PD,CLK`.
 
 ## Hardware warning
 
@@ -33,7 +33,8 @@ The AD9744 module P1 pinout is:
 
 The Navigator ZYNQ baseboard RGB LCD 40-pin connector does not match these
 power and ground positions. Do not bare-plug the AD9744 module into the LCD
-connector. Use a short 2x10 adapter cable/board and wire the signals according
+connector unless your adapter board explicitly remaps the power and ground
+positions. Use a short 2x10 adapter cable/board and wire the signals according
 to `ad9744_lcd_adapter.xdc`. Supply AD9744 `+5V` and `GND` from the board power
 pins or a stable external 5 V supply, with common ground to the FPGA board.
 
@@ -41,22 +42,26 @@ pins or a stable external 5 V supply, with common ground to the FPGA board.
 
 | AD9744 P1 | Navigator signal | FPGA pin |
 | --- | --- | --- |
-| PD/SLEEP | LCD_R0 | W18 |
-| CLK | LCD_CLK | P19 |
-| D14 | LCD_R1 | W19 |
-| D13 | LCD_R2 | R16 |
-| D12 | LCD_R3 | R17 |
-| D11 | LCD_R4 | W20 |
-| D10 | LCD_R5 | V20 |
-| D9 | LCD_R6 | P18 |
-| D8 | LCD_R7 | N17 |
-| D7 | LCD_G0 | V17 |
-| D6 | LCD_G1 | V18 |
-| D5 | LCD_G2 | T17 |
-| D4 | LCD_G3 | R18 |
-| D3 | LCD_G4 | Y18 |
-| D2 | LCD_G5 | Y19 |
-| D1 | LCD_G6 | P15 |
+| D2 | user adapter pin 1 | R16 |
+| D1 | user adapter pin 2 | R17 |
+| D4 | user adapter pin 3 | W18 |
+| D3 | user adapter pin 4 | W19 |
+| D6 | user adapter pin 5 | P15 |
+| D5 | user adapter pin 6 | P16 |
+| D8 | user adapter pin 7 | Y18 |
+| D7 | user adapter pin 8 | Y19 |
+| D10 | user adapter pin 9 | T17 |
+| D9 | user adapter pin 10 | R18 |
+| D12 | user adapter pin 11 | V17 |
+| D11 | user adapter pin 12 | V18 |
+| D14 | user adapter pin 13 | T16 |
+| D13 | user adapter pin 14 | U17 |
+| PD/SLEEP | user adapter pin 15 | Y17 |
+| CLK | user adapter pin 16 | Y16 |
+| spare | user adapter pin 17 | T14 |
+| spare | user adapter pin 18 | T15 |
+| spare | user adapter pin 19 | V16 |
+| spare | user adapter pin 20 | W16 |
 | GND | GND | board GND |
 | +5V | +5V | board +5V |
 
