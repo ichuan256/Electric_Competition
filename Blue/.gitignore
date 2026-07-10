@@ -1,0 +1,43 @@
+# CubeMX temp
+.mxproject
+
+# Keil MDK
+*.uvguix.*
+*.uvoptx
+*.crf
+*.d
+*.o
+*.dep
+*.axf
+*.elf
+*.hex
+*.bin
+*.htm
+*.lnp
+*.map
+*.sct
+*.build_log.htm
+build_check.log
+*_build.log
+*.lst
+JLinkLog.txt
+JLinkSettings.ini
+*.iex
+*.scvd
+*.dbgconf
+RTE/
+MDK-ARM/*/
+
+# Debug
+DebugConfig/
+*.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
