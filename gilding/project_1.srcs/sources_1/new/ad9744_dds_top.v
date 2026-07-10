@@ -38,6 +38,7 @@ module ad9744_dds_top #(
 
     wire [7:0] phase_index = phase_acc[47:40];
     wire [13:0] sine_sample = sine_lut_256(phase_index);
+    wire dac_clk_forwarded;
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
@@ -55,7 +56,21 @@ module ad9744_dds_top #(
         end
     end
 
-    assign dac_clk   = sys_clk;
+    ODDR #(
+        .DDR_CLK_EDGE("SAME_EDGE"),
+        .INIT(1'b0),
+        .SRTYPE("SYNC")
+    ) u_dac_clk_oddr (
+        .Q(dac_clk_forwarded),
+        .C(sys_clk),
+        .CE(1'b1),
+        .D1(1'b0),
+        .D2(1'b1),
+        .R(1'b0),
+        .S(1'b0)
+    );
+
+    assign dac_clk   = dac_clk_forwarded;
     assign dac_data  = dac_data_r;
     assign dac_sleep = 1'b0;
 
