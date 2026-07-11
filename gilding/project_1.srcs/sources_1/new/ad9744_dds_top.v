@@ -173,7 +173,7 @@ module ad9744_clocking (
 `ifdef SYNTHESIS
     clk_wiz_0 u_clk_wiz (
         .clk_out1(clk_out1),
-        .resetn(resetn),
+        .reset(~resetn),
         .locked(locked),
         .clk_in1(clk_in1)
     );

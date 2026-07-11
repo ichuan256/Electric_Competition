@@ -10,8 +10,8 @@ set_property -dict [list \
     CONFIG.PRIM_IN_FREQ {50.000} \
     CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {100.000} \
     CONFIG.USE_RESET {true} \
-    CONFIG.RESET_TYPE {ACTIVE_LOW} \
-    CONFIG.RESET_PORT {resetn} \
+    CONFIG.RESET_TYPE {ACTIVE_HIGH} \
+    CONFIG.RESET_PORT {reset} \
     CONFIG.USE_LOCKED {true}] [get_ips clk_wiz_0]
 generate_target all [get_ips clk_wiz_0]
 export_ip_user_files -of_objects [get_ips clk_wiz_0] -no_script -sync -force -quiet

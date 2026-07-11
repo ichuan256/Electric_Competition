@@ -17,7 +17,8 @@
 板载 50 MHz 时钟不直接作为 DAC 输出时钟。`create_clock_ip.tcl` 会创建赛灵思
 Clocking Wizard IP `clk_wiz_0`，将 50 MHz 输入时钟转换为 100 MHz 采样时钟。
 
-在 Vivado Tcl Console 中执行一次：
+工程已经包含 `clk_wiz_0.xci`，正常打开工程后可直接生成 IP 输出产品并综合。
+如果需要重新创建或覆盖 IP，也可以在 Vivado Tcl Console 中执行：
 
 ```tcl
 source create_clock_ip.tcl
@@ -187,5 +188,5 @@ AD9744 模块 SMA
 - 5 µs 内是否出现足够的 DAC 时钟边沿；
 - 默认 1 MHz DDS 输出数据是否发生变化。
 
-执行综合前仍需运行 `source create_clock_ip.tcl`，因为硬件实现必须使用真正的
-Clocking Wizard IP。
+硬件综合使用工程内的 `clk_wiz_0.xci`。如果 Vivado 提示 IP 版本较旧，请先在
+IP Status 窗口执行 Upgrade Selected，然后执行 Generate Output Products。
