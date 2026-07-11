@@ -35,6 +35,13 @@ typedef struct {
   uint8_t ui_input_len;
   char ui_input[SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN + 1U];
   uint16_t ui_sweep_time_ms;
+  uint32_t fpga_frequency_hz;
+  uint16_t fpga_phase_deg;
+  uint16_t fpga_amplitude_code;
+  int16_t fpga_offset_code;
+  uint16_t fpga_duty_code;
+  uint8_t fpga_waveform;
+  uint8_t fpga_output_enable;
   char last_key;
   uint8_t last_key_ascii;
   uint32_t rx_count;
