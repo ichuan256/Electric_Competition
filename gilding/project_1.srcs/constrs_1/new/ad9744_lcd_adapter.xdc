@@ -1,28 +1,31 @@
-# AD9744 DDS demo constraints for ALIENTEK Navigator ZYNQ.
+# 领航者 ZYNQ 与 AD9744 DDS 工程约束。
 #
-# Important hardware warning:
-#   The AD9744 module P1 header is not pin-compatible with the Navigator RGB LCD
-#   40-pin socket power/GND positions. Do NOT bare-plug the AD9744 module into
-#   the LCD socket. Use a short adapter cable/board.
+# 重要硬件警告：
+#   AD9744 模块 P1 排针与领航者 RGB LCD 40 针接口的电源、地位置不兼容。
+#   禁止把 AD9744 模块直接插到 LCD 接口，必须使用短转接线或转接板。
 #
-# Adapter mapping used here, confirmed by the user:
-#   FPGA pins are assigned in the AD9744 physical order:
+# 已确认的转接映射：
+#   FPGA 管脚按照下列 AD9744 信号顺序分配：
 #   D2, D1, D4, D3, ..., D14, D13, PD/SLEEP, CLK.
-#   +5V and GND are hardware-only supplies and do not appear in Verilog/XDC.
+#   +5V 和 GND 仅由硬件连接，不出现在 Verilog/XDC 端口中。
 
 create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 
 set_property -dict {PACKAGE_PIN U18 IOSTANDARD LVCMOS33} [get_ports sys_clk]
 set_property -dict {PACKAGE_PIN N16 IOSTANDARD LVCMOS33} [get_ports sys_rst_n]
 
-# Board debug LED. LED0 is driven high to prove the programmed bitstream is new.
+# 板载调试 LED0。
 set_property -dict {PACKAGE_PIN H15 IOSTANDARD LVCMOS33} [get_ports led0]
 
-# AD9744 control
+# 单片机 UART：MCU_TX -> K14（FPGA RX），MCU_RX <- M15（FPGA TX），3.3 V 电平并共地。
+set_property -dict {PACKAGE_PIN K14 IOSTANDARD LVCMOS33} [get_ports mcu_uart_rxd]
+set_property -dict {PACKAGE_PIN M15 IOSTANDARD LVCMOS33} [get_ports mcu_uart_txd]
+
+# AD9744 控制信号
 set_property -dict {PACKAGE_PIN Y17 IOSTANDARD LVCMOS33} [get_ports dac_sleep] ;# AD9744 PD/SLEEP
 set_property -dict {PACKAGE_PIN Y16 IOSTANDARD LVCMOS33} [get_ports dac_clk]   ;# AD9744 CLK
 
-# AD9744 data bus. AD9744 silkscreen uses D14..D1; Verilog uses dac_data[13:0].
+# AD9744 数据总线。模块丝印为 D14..D1，Verilog 端口为 dac_data[13:0]。
 set_property -dict {PACKAGE_PIN T16 IOSTANDARD LVCMOS33} [get_ports {dac_data[13]}] ;# D14
 set_property -dict {PACKAGE_PIN U17 IOSTANDARD LVCMOS33} [get_ports {dac_data[12]}] ;# D13
 set_property -dict {PACKAGE_PIN V17 IOSTANDARD LVCMOS33} [get_ports {dac_data[11]}] ;# D12
@@ -42,3 +45,11 @@ set_property DRIVE 8 [get_ports {dac_data[*]}]
 set_property DRIVE 8 [get_ports dac_clk]
 set_property SLEW FAST [get_ports {dac_data[*]}]
 set_property SLEW FAST [get_ports dac_clk]
+
+# AD9744 要求建立时间 tS >= 2.0 ns、保持时间 tH >= 1.5 ns。
+# 数据在内部 100 MHz 时钟上升沿更新，转发的 dac_clk 在 5 ns 后产生上升沿。
+create_generated_clock -name dac_sample_clk -source [get_ports sys_clk] \
+    -multiply_by 2 -invert [get_ports dac_clk]
+set_output_delay -clock dac_sample_clk -max 2.0 [get_ports {dac_data[*]}]
+set_output_delay -clock dac_sample_clk -min -1.5 [get_ports {dac_data[*]}]
+set_false_path -from [get_ports mcu_uart_rxd]
