@@ -4,8 +4,10 @@
 #include "stm32h7xx_hal.h"
 
 typedef struct {
-  uint8_t next_tx_value;
-  uint8_t last_tx_value;
+  uint8_t last_cmd;
+  uint32_t last_data;
+  uint8_t last_ack_cmd;
+  uint8_t last_ack_status;
   uint8_t rx_value;
   uint8_t has_rx;
   uint32_t tx_count;
@@ -17,6 +19,9 @@ typedef struct {
 
 void FpgaUart_Init(void);
 void FpgaUart_Task(void);
+void FpgaUart_SetSignal(uint32_t frequency_hz, uint16_t amplitude_code,
+                        int16_t offset_code, uint16_t duty_code,
+                        uint8_t waveform, uint8_t output_enable);
 FpgaUartState FpgaUart_GetState(void);
 
 #endif

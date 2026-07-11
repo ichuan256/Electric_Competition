@@ -460,13 +460,14 @@ static void Spectrum_RefreshLcd(void)
 
   if (fpga_state.has_rx != 0U)
   {
-    sprintf(line, "FPGA TX:%3u RX:%3u  C:%u",
-            fpga_state.last_tx_value, fpga_state.rx_value, (unsigned int)fpga_state.rx_count);
+    sprintf(line, "FPGA C:%02X A:%02X/%u C:%u",
+            fpga_state.last_cmd, fpga_state.last_ack_cmd,
+            fpga_state.last_ack_status, (unsigned int)fpga_state.rx_count);
   }
   else
   {
-    sprintf(line, "FPGA TX:%3u RX:---  C:%u",
-            fpga_state.last_tx_value, (unsigned int)fpga_state.rx_count);
+    sprintf(line, "FPGA C:%02X A:--  TX:%u",
+            fpga_state.last_cmd, (unsigned int)fpga_state.tx_count);
   }
   Spectrum_ShowLine(6, SPECTRUM_DISPLAY_INFO_Y + (SPECTRUM_DISPLAY_INFO_GAP * 2U), line);
 
