@@ -110,8 +110,8 @@ module ad9744_dds_top (
     reg [31:0] phase_acc;
     reg signed [14:0] wave_raw;
     reg signed [29:0] product;
-    reg signed [15:0] mixed;
-    reg [13:0] dac_data_r;
+    // 强制把 DAC 输出寄存器放入 IOB，缩短寄存器到封装管脚的延迟。
+    (* IOB = "TRUE" *) reg [13:0] dac_data_r;
     wire [31:0] phase = phase_acc + phase_offset;
     wire [7:0] sine_addr = phase[31:24];
     wire signed [14:0] sine_value = $signed({1'b0, sine_lut_256(sine_addr)}) - 15'sd8192;
@@ -141,12 +141,10 @@ module ad9744_dds_top (
         if (!sample_rst_n) begin
             phase_acc  <= 32'd0;
             product    <= 30'sd0;
-            mixed      <= 16'sd0;
             dac_data_r <= 14'd0;
         end else begin
             phase_acc <= phase_acc + ftw;
             product   <= wave_raw * $signed({1'b0, amplitude});
-            mixed     <= sum_value;
             dac_data_r <= output_enable ? limited_value[13:0] : 14'd0;
         end
     end

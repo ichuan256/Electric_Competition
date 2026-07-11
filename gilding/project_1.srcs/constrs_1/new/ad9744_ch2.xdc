@@ -21,7 +21,8 @@ set_property DRIVE 8 [get_ports dac2_clk]
 set_property SLEW FAST [get_ports {dac2_data[*]}]
 set_property SLEW FAST [get_ports dac2_clk]
 
-create_generated_clock -name dac2_sample_clk -source [get_ports sys_clk] \
-    -multiply_by 2 -invert [get_ports dac2_clk]
+# 第二路同样从本通道 ODDR 的真实 C 输入推导，不能从 sys_clk 另建一棵时钟。
+create_generated_clock -name dac2_sample_clk \
+    -source [get_pins u_dac2/u_dac2_clk_oddr/C] -invert [get_ports dac2_clk]
 set_output_delay -clock dac2_sample_clk -max 2.0 [get_ports {dac2_data[*]}]
 set_output_delay -clock dac2_sample_clk -min -1.5 [get_ports {dac2_data[*]}]

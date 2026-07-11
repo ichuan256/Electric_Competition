@@ -51,7 +51,8 @@ module ad9744_dds_ch2 (
     reg [31:0] phase_acc;
     reg signed [14:0] wave_raw;
     reg signed [29:0] product;
-    reg [13:0] dac_data_r;
+    // 第二路数据寄存器必须进入 IOB，否则 100 MHz 半周期输出时序无法收敛。
+    (* IOB = "TRUE" *) reg [13:0] dac_data_r;
     wire [31:0] phase = phase_acc + phase_offset;
     wire signed [14:0] sine_value = $signed({1'b0, sine_lut_256(phase[31:24])}) - 15'sd8192;
     wire signed [14:0] saw_value = $signed({1'b0, phase[31:18]}) - 15'sd8192;
