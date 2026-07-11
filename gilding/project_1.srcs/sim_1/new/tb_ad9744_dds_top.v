@@ -9,6 +9,9 @@ module tb_ad9744_dds_top;
     wire dac_clk;
     wire [13:0] dac_data;
     wire dac_sleep;
+    wire dac2_clk;
+    wire [13:0] dac2_data;
+    wire dac2_sleep;
     wire led0;
 
     integer dac_edges;
@@ -25,6 +28,9 @@ module tb_ad9744_dds_top;
         .dac_clk(dac_clk),
         .dac_data(dac_data),
         .dac_sleep(dac_sleep),
+        .dac2_clk(dac2_clk),
+        .dac2_data(dac2_data),
+        .dac2_sleep(dac2_sleep),
         .led0(led0)
     );
 
@@ -58,6 +64,8 @@ module tb_ad9744_dds_top;
 
         if (dac_sleep !== 1'b0)
             $fatal(1, "dac_sleep 应保持低电平");
+        if (dac2_sleep !== 1'b0)
+            $fatal(1, "dac2_sleep 应保持低电平");
         if (dac_edges < 400)
             $fatal(1, "DAC 时钟未正常运行，检测到的上升沿数量不足");
         if ((dac_period < 9.9) || (dac_period > 10.1))

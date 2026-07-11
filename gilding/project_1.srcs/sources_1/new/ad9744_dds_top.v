@@ -10,10 +10,14 @@ module ad9744_dds_top (
     output wire        dac_clk,
     output wire [13:0] dac_data,
     output wire        dac_sleep,
+    output wire        dac2_clk,
+    output wire [13:0] dac2_data,
+    output wire        dac2_sleep,
     output wire        led0
 );
     wire sample_clk;
     wire clk_locked;
+    wire sample_rst_n;
 
     ad9744_clocking u_clocking (
         .clk_out1(sample_clk),
@@ -30,6 +34,14 @@ module ad9744_dds_top (
     wire [15:0] cfg_duty_sys;
     wire [2:0]  cfg_wave_sys;
     wire        cfg_enable_sys;
+    wire        cfg2_toggle_sys;
+    wire [31:0] cfg2_ftw_sys;
+    wire [31:0] cfg2_phase_sys;
+    wire [13:0] cfg2_amplitude_sys;
+    wire signed [13:0] cfg2_offset_sys;
+    wire [15:0] cfg2_duty_sys;
+    wire [2:0]  cfg2_wave_sys;
+    wire        cfg2_enable_sys;
     wire        uart_activity;
 
     uart_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_uart_config (
@@ -38,7 +50,21 @@ module ad9744_dds_top (
         .cfg_toggle(cfg_toggle_sys), .ftw(cfg_ftw_sys),
         .phase_offset(cfg_phase_sys), .amplitude(cfg_amplitude_sys),
         .dc_offset(cfg_offset_sys), .duty(cfg_duty_sys),
-        .wave_sel(cfg_wave_sys), .output_enable(cfg_enable_sys)
+        .wave_sel(cfg_wave_sys), .output_enable(cfg_enable_sys),
+        .cfg2_toggle(cfg2_toggle_sys), .ftw2(cfg2_ftw_sys),
+        .phase_offset2(cfg2_phase_sys), .amplitude2(cfg2_amplitude_sys),
+        .dc_offset2(cfg2_offset_sys), .duty2(cfg2_duty_sys),
+        .wave_sel2(cfg2_wave_sys), .output_enable2(cfg2_enable_sys)
+    );
+
+    // 第二路 DAC 使用独立源文件，便于单独维护和后续接入电压转电流模块。
+    ad9744_dds_ch2 u_dac2 (
+        .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
+        .cfg_toggle_sys(cfg2_toggle_sys), .cfg_ftw_sys(cfg2_ftw_sys),
+        .cfg_phase_sys(cfg2_phase_sys), .cfg_amplitude_sys(cfg2_amplitude_sys),
+        .cfg_offset_sys(cfg2_offset_sys), .cfg_duty_sys(cfg2_duty_sys),
+        .cfg_wave_sys(cfg2_wave_sys), .cfg_enable_sys(cfg2_enable_sys),
+        .dac_clk(dac2_clk), .dac_data(dac2_data), .dac_sleep(dac2_sleep)
     );
 
     reg [1:0] reset_sync;
@@ -46,7 +72,7 @@ module ad9744_dds_top (
         if (!sys_rst_n) reset_sync <= 2'b00;
         else            reset_sync <= {reset_sync[0], clk_locked};
     end
-    wire sample_rst_n = reset_sync[1];
+    assign sample_rst_n = reset_sync[1];
 
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。
     reg [2:0] cfg_toggle_sync;
@@ -208,7 +234,11 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     output reg activity, output reg cfg_toggle, output reg [31:0] ftw,
     output reg [31:0] phase_offset, output reg [13:0] amplitude,
     output reg signed [13:0] dc_offset, output reg [15:0] duty,
-    output reg [2:0] wave_sel, output reg output_enable
+    output reg [2:0] wave_sel, output reg output_enable,
+    output reg cfg2_toggle, output reg [31:0] ftw2,
+    output reg [31:0] phase_offset2, output reg [13:0] amplitude2,
+    output reg signed [13:0] dc_offset2, output reg [15:0] duty2,
+    output reg [2:0] wave_sel2, output reg output_enable2
 );
     wire rx_valid; wire [7:0] rx_byte; wire tx_busy;
     reg tx_start; reg [7:0] tx_byte; reg [2:0] index; reg [7:0] command;
@@ -221,6 +251,9 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
             ack_index<=0; ack_pending<=0; activity<=0; cfg_toggle<=0;
             ftw<=32'd42_949_673; phase_offset<=0; amplitude<=14'd8191;
             dc_offset<=0; duty<=16'h8000; wave_sel<=0; output_enable<=1;
+            cfg2_toggle<=0; ftw2<=32'd42_949_673; phase_offset2<=0;
+            amplitude2<=14'd8191; dc_offset2<=0; duty2<=16'h8000;
+            wave_sel2<=0; output_enable2<=1;
         end else begin
             tx_start <= 0;
             if (rx_valid) begin
@@ -243,9 +276,17 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
                             8'h05: duty<=payload[15:0];
                             8'h06: wave_sel<=payload[2:0];
                             8'h07: output_enable<=payload[0];
+                            8'h81: ftw2<=payload;
+                            8'h82: phase_offset2<=payload;
+                            8'h83: amplitude2<=payload[13:0];
+                            8'h84: dc_offset2<=payload[13:0];
+                            8'h85: duty2<=payload[15:0];
+                            8'h86: wave_sel2<=payload[2:0];
+                            8'h87: output_enable2<=payload[0];
                             default: ;
                         endcase
                         if (command>=8'h01 && command<=8'h07) cfg_toggle<=~cfg_toggle;
+                        if (command>=8'h81 && command<=8'h87) cfg2_toggle<=~cfg2_toggle;
                         ack_pending<=1; ack_index<=0;
                     end
                 end
