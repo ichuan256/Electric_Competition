@@ -24,6 +24,8 @@
 #define SPECTRUM_STEP_KHZ           100UL
 #define SPECTRUM_POINT_COUNT        221U
 #define SPECTRUM_SPUR_THRESHOLD_PERCENT 2UL
+/* 2% in the linear detector input domain is about -16.99 dB. */
+#define SPECTRUM_SPUR_THRESHOLD_DB_X10 170
 #define SPECTRUM_SWEEP_TIME_MIN_MS  1000UL
 #define SPECTRUM_SWEEP_TIME_MAX_MS  5000UL
 #define SPECTRUM_ADC_SETTLE_MS      5UL
@@ -81,6 +83,13 @@ typedef struct {
   uint8_t ui_input_len;
   char ui_input[SPECTRUM_UI_INPUT_MAX_LEN + 1U];
   uint16_t ui_sweep_time_ms;
+  uint32_t fpga_frequency_hz;
+  uint16_t fpga_phase_deg;
+  uint16_t fpga_amplitude_code;
+  int16_t fpga_offset_code;
+  uint16_t fpga_duty_code;
+  uint8_t fpga_waveform;
+  uint8_t fpga_output_enable;
 } SpectrumHostSnapshot;
 
 void SpectrumSystem_Init(void);

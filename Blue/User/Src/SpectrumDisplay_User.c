@@ -21,6 +21,12 @@
 #define SPECTRUM_DISPLAY_INFO_GAP   18U
 #define SPECTRUM_DISPLAY_GRAPH_Y    226U
 #define SPECTRUM_DISPLAY_GRAPH_H    80U
+#define SPECTRUM_DISPLAY_FPGA_BOX_X 330U
+#define SPECTRUM_DISPLAY_FPGA_BOX_Y 42U
+#define SPECTRUM_DISPLAY_FPGA_BOX_W 145U
+#define SPECTRUM_DISPLAY_FPGA_BOX_H 222U
+#define SPECTRUM_DISPLAY_FPGA_FIRST_FIELD 3U
+#define SPECTRUM_DISPLAY_FPGA_FIELD_COUNT 7U
 
 static SpectrumDisplayState display_state;
 static uint16_t display_points_mv[SPECTRUM_DISPLAY_POINT_COUNT];
@@ -51,6 +57,11 @@ static uint32_t Spectrum_ReadU32(const uint8_t *buf, uint8_t *pos)
   value |= (uint32_t)buf[(uint8_t)(*pos + 3U)] << 24;
   *pos = (uint8_t)(*pos + 4U);
   return value;
+}
+
+static int16_t Spectrum_ReadI16(const uint8_t *buf, uint8_t *pos)
+{
+  return (int16_t)Spectrum_ReadU16(buf, pos);
 }
 
 static const char *Spectrum_ModeText(uint8_t mode)
@@ -88,12 +99,24 @@ static const char *Spectrum_UiFieldText(uint8_t focus)
     case 0U: return "TIME";
     case 1U: return "OUT";
     case 2U: return "FREQ";
+    case 3U: return "FFREQ";
+    case 4U: return "PHASE";
+    case 5U: return "AMP";
+    case 6U: return "OFFS";
+    case 7U: return "DUTY";
+    case 8U: return "WAVE";
+    case 9U: return "EN";
     default: return "?";
   }
 }
 
 static uint8_t Spectrum_DisplayFieldEditable(uint8_t mode, uint8_t field)
 {
+  if (field >= SPECTRUM_DISPLAY_FPGA_FIRST_FIELD)
+  {
+    return 1U;
+  }
+
   if (mode == 0U)
   {
     return (field == 0U) ? 1U : 0U;
@@ -163,6 +186,61 @@ static void Spectrum_FormatEditText(char *text, uint8_t text_len)
   text[len] = '\0';
 }
 
+static void Spectrum_FormatFpgaFieldValue(uint8_t field, char *text, uint8_t text_len)
+{
+  if ((text == 0) || (text_len == 0U))
+  {
+    return;
+  }
+
+  if (field == 3U)
+  {
+    snprintf(text, text_len, "%lu.%03luM",
+             display_state.fpga_frequency_hz / 1000000UL,
+             (display_state.fpga_frequency_hz / 1000UL) % 1000UL);
+  }
+  else if (field == 4U)
+  {
+    snprintf(text, text_len, "%u", display_state.fpga_phase_deg);
+  }
+  else if (field == 5U)
+  {
+    snprintf(text, text_len, "%u", display_state.fpga_amplitude_code);
+  }
+  else if (field == 6U)
+  {
+    snprintf(text, text_len, "%d", display_state.fpga_offset_code);
+  }
+  else if (field == 7U)
+  {
+    uint32_t duty_x10 = ((uint32_t)display_state.fpga_duty_code * 1000UL + 32767UL) / 65535UL;
+    snprintf(text, text_len, "%lu.%lu%%", duty_x10 / 10UL, duty_x10 % 10UL);
+  }
+  else if (field == 8U)
+  {
+    snprintf(text, text_len, "%u", display_state.fpga_waveform);
+  }
+  else if (field == 9U)
+  {
+    snprintf(text, text_len, "%u", display_state.fpga_output_enable);
+  }
+  else
+  {
+    snprintf(text, text_len, "-");
+  }
+}
+
+static void Spectrum_ApplyFpgaSettings(void)
+{
+  FpgaUart_SetSignal(display_state.fpga_frequency_hz,
+                     display_state.fpga_phase_deg,
+                     display_state.fpga_amplitude_code,
+                     display_state.fpga_offset_code,
+                     display_state.fpga_duty_code,
+                     display_state.fpga_waveform,
+                     display_state.fpga_output_enable);
+}
+
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
 {
   uint8_t pos = 0;
@@ -218,6 +296,18 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
   if (len >= 45U)
   {
     display_state.ui_sweep_time_ms = Spectrum_ReadU16(data, &pos);
+  }
+
+  if (len >= 57U)
+  {
+    display_state.fpga_frequency_hz = Spectrum_ReadU32(data, &pos);
+    display_state.fpga_phase_deg = Spectrum_ReadU16(data, &pos);
+    display_state.fpga_amplitude_code = Spectrum_ReadU16(data, &pos);
+    display_state.fpga_offset_code = Spectrum_ReadI16(data, &pos);
+    display_state.fpga_duty_code = Spectrum_ReadU16(data, &pos);
+    display_state.fpga_waveform = data[pos++];
+    display_state.fpga_output_enable = data[pos++];
+    Spectrum_ApplyFpgaSettings();
   }
 }
 
@@ -385,6 +475,46 @@ static void Spectrum_DrawUiBoxes(void)
   }
 }
 
+static void Spectrum_DrawFpgaBox(void)
+{
+  const uint16_t box_x = SPECTRUM_DISPLAY_FPGA_BOX_X;
+  const uint16_t box_y = SPECTRUM_DISPLAY_FPGA_BOX_Y;
+  const uint16_t box_w = SPECTRUM_DISPLAY_FPGA_BOX_W;
+  const uint16_t box_h = SPECTRUM_DISPLAY_FPGA_BOX_H;
+  char value[16];
+
+  lcd_fill(box_x, box_y, (uint16_t)(box_x + box_w), (uint16_t)(box_y + box_h), WHITE);
+  lcd_draw_rectangle(box_x, box_y, (uint16_t)(box_x + box_w), (uint16_t)(box_y + box_h), BLUE);
+  lcd_show_string((uint16_t)(box_x + 6U), (uint16_t)(box_y + 6U),
+                  (uint16_t)(box_w - 12U), 16, 16, "FPGA UART", RED);
+
+  for (uint8_t i = 0U; i < SPECTRUM_DISPLAY_FPGA_FIELD_COUNT; i++)
+  {
+    uint8_t field = (uint8_t)(SPECTRUM_DISPLAY_FPGA_FIRST_FIELD + i);
+    uint16_t row_y = (uint16_t)(box_y + 28U + ((uint16_t)i * 26U));
+    uint8_t selected = (display_state.ui_focus == field) ? 1U : 0U;
+    uint16_t border = (selected != 0U) ?
+                      ((display_state.ui_editing != 0U) ? RED : BLUE) : LGRAY;
+
+    lcd_draw_rectangle((uint16_t)(box_x + 4U), row_y,
+                       (uint16_t)(box_x + box_w - 4U), (uint16_t)(row_y + 23U), border);
+    lcd_show_string((uint16_t)(box_x + 8U), (uint16_t)(row_y + 4U),
+                    52U, 16U, 16U, (char *)Spectrum_UiFieldText(field), BLACK);
+
+    if ((selected != 0U) && (display_state.ui_editing != 0U))
+    {
+      Spectrum_FormatEditText(value, sizeof(value));
+    }
+    else
+    {
+      Spectrum_FormatFpgaFieldValue(field, value, sizeof(value));
+    }
+
+    lcd_show_string((uint16_t)(box_x + 62U), (uint16_t)(row_y + 4U),
+                    72U, 16U, 16U, value, BLACK);
+  }
+}
+
 static void Spectrum_RefreshLcd(void)
 {
   char line[40];
@@ -442,7 +572,7 @@ static void Spectrum_RefreshLcd(void)
     sprintf(line, "EDIT:%-9s         D=OK", edit_text);
     Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
   }
-  else if (display_state.mode == 3U)
+  else if ((display_state.mode == 3U) && (display_state.ui_focus < SPECTRUM_DISPLAY_FPGA_FIRST_FIELD))
   {
     sprintf(line, "LOCK DEMO: no editable value");
     Spectrum_ShowLine(4, SPECTRUM_DISPLAY_INFO_Y, line);
@@ -460,18 +590,19 @@ static void Spectrum_RefreshLcd(void)
 
   if (fpga_state.has_rx != 0U)
   {
-    sprintf(line, "FPGA C:%02X A:%02X/%u C:%u",
+    sprintf(line, "FPGA C:%02X A:%02X/%u D:%02X",
             fpga_state.last_cmd, fpga_state.last_ack_cmd,
-            fpga_state.last_ack_status, (unsigned int)fpga_state.rx_count);
+            fpga_state.last_ack_status, fpga_state.dirty_mask);
   }
   else
   {
-    sprintf(line, "FPGA C:%02X A:--  TX:%u",
-            fpga_state.last_cmd, (unsigned int)fpga_state.tx_count);
+    sprintf(line, "FPGA C:%02X A:--  D:%02X",
+            fpga_state.last_cmd, fpga_state.dirty_mask);
   }
   Spectrum_ShowLine(6, SPECTRUM_DISPLAY_INFO_Y + (SPECTRUM_DISPLAY_INFO_GAP * 2U), line);
 
   Spectrum_DrawUiBoxes();
+  Spectrum_DrawFpgaBox();
 
   if ((display_force_refresh != 0U) || (display_graph_dirty != 0U))
   {
@@ -511,6 +642,13 @@ void SpectrumDisplay_Init(void)
   display_state.ui_input_len = 0U;
   display_state.ui_input[0] = '\0';
   display_state.ui_sweep_time_ms = 3000U;
+  display_state.fpga_frequency_hz = 1000000UL;
+  display_state.fpga_phase_deg = 0U;
+  display_state.fpga_amplitude_code = 8191U;
+  display_state.fpga_offset_code = 0;
+  display_state.fpga_duty_code = 32768U;
+  display_state.fpga_waveform = 0U;
+  display_state.fpga_output_enable = 1U;
   display_state.last_key = '-';
   display_state.last_key_ascii = 0;
   display_state.rx_count = 0;
