@@ -164,14 +164,30 @@ static void Spectrum_UiCancelEdit(void)
 
 static void Spectrum_UiAppendInput(char key)
 {
+  if (key == '#')
+  {
+    key = '.';
+  }
+
   if (spectrum_snapshot.ui_input_len >= SPECTRUM_UI_INPUT_MAX_LEN)
   {
     return;
   }
 
-  if (Spectrum_IsDigit(key) == 0U)
+  if ((Spectrum_IsDigit(key) == 0U) && (key != '.'))
   {
     return;
+  }
+
+  if (key == '.')
+  {
+    for (uint8_t i = 0U; i < spectrum_snapshot.ui_input_len; i++)
+    {
+      if (spectrum_snapshot.ui_input[i] == '.')
+      {
+        return;
+      }
+    }
   }
 
   spectrum_snapshot.ui_input[spectrum_snapshot.ui_input_len++] = key;
@@ -987,7 +1003,7 @@ void SpectrumSystem_OnKey(char key)
     {
       Spectrum_UiClearInput();
     }
-    else if ((key == '*') || (key == '#'))
+    else if (key == '*')
     {
       Spectrum_UiBackspace();
     }
