@@ -28,6 +28,8 @@ typedef struct {
   uint8_t dirty_mask;
   uint8_t queue_count;
   uint8_t queue_index;
+  uint8_t waiting_ack;
+  uint8_t retry_count;
   HAL_StatusTypeDef last_tx_status;
   HAL_StatusTypeDef last_rx_status;
 } FpgaUartState;

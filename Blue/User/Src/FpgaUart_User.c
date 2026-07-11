@@ -7,6 +7,8 @@
 #define FPGA_UART_FRAME_LEN       7U
 #define FPGA_UART_ACK_LEN         4U
 #define FPGA_UART_SEND_PERIOD_MS  20UL
+#define FPGA_UART_ACK_TIMEOUT_MS  100UL
+#define FPGA_UART_MAX_RETRY       2U
 #define FPGA_UART_TX_TIMEOUT_MS   50U
 #define FPGA_UART_SAMPLE_CLK_HZ   100000000ULL
 #define FPGA_UART_QUEUE_MAX       48U
@@ -44,6 +46,10 @@ static uint8_t fpga_uart_ack_pos;
 static FpgaUartCommand fpga_uart_queue[FPGA_UART_QUEUE_MAX];
 static uint8_t fpga_uart_queue_count;
 static uint8_t fpga_uart_queue_index;
+static uint8_t fpga_uart_waiting_ack;
+static uint8_t fpga_uart_retry_count;
+static uint8_t fpga_uart_pending_cmd;
+static uint32_t fpga_uart_last_ack_wait_tick;
 
 static uint8_t FpgaUart_Checksum(const uint8_t *data, uint8_t len)
 {
@@ -124,7 +130,25 @@ static void FpgaUart_ReadAck(void)
       {
         fpga_uart_state.last_ack_cmd = fpga_uart_ack_buf[1];
         fpga_uart_state.last_ack_status = fpga_uart_ack_buf[2];
-        if (fpga_uart_ack_buf[2] != 0U)
+
+        if ((fpga_uart_waiting_ack != 0U) &&
+            (fpga_uart_ack_buf[1] == fpga_uart_pending_cmd))
+        {
+          fpga_uart_waiting_ack = 0U;
+          fpga_uart_state.waiting_ack = 0U;
+          if (fpga_uart_ack_buf[2] == 0U)
+          {
+            fpga_uart_queue_index++;
+          }
+          else
+          {
+            fpga_uart_queue_count = fpga_uart_queue_index;
+            fpga_uart_state.error_count++;
+          }
+          fpga_uart_retry_count = 0U;
+          fpga_uart_state.retry_count = 0U;
+        }
+        else if (fpga_uart_ack_buf[2] != 0U)
         {
           fpga_uart_state.error_count++;
         }
@@ -142,8 +166,13 @@ static void FpgaUart_ClearQueue(void)
 {
   fpga_uart_queue_count = 0U;
   fpga_uart_queue_index = 0U;
+  fpga_uart_waiting_ack = 0U;
+  fpga_uart_retry_count = 0U;
+  fpga_uart_pending_cmd = 0U;
   fpga_uart_state.queue_count = 0U;
   fpga_uart_state.queue_index = 0U;
+  fpga_uart_state.waiting_ack = 0U;
+  fpga_uart_state.retry_count = 0U;
   fpga_uart_state.dirty_mask = 0U;
 }
 
@@ -194,9 +223,12 @@ void FpgaUart_Init(void)
   fpga_uart_state.dirty_mask = 0U;
   fpga_uart_state.queue_count = 0U;
   fpga_uart_state.queue_index = 0U;
+  fpga_uart_state.waiting_ack = 0U;
+  fpga_uart_state.retry_count = 0U;
   fpga_uart_state.last_tx_status = HAL_OK;
   fpga_uart_state.last_rx_status = HAL_OK;
   fpga_uart_last_tx_tick = HAL_GetTick();
+  fpga_uart_last_ack_wait_tick = fpga_uart_last_tx_tick;
   fpga_uart_ack_pos = 0U;
   FpgaUart_ClearQueue();
 }
@@ -205,11 +237,39 @@ void FpgaUart_Task(void)
 {
   uint32_t now = HAL_GetTick();
   HAL_StatusTypeDef status;
+  uint8_t should_send = 0U;
 
   FpgaUart_ReadAck();
 
-  if (((now - fpga_uart_last_tx_tick) >= FPGA_UART_SEND_PERIOD_MS) &&
+  if ((fpga_uart_waiting_ack != 0U) &&
+      ((now - fpga_uart_last_ack_wait_tick) >= FPGA_UART_ACK_TIMEOUT_MS))
+  {
+    fpga_uart_state.error_count++;
+    if (fpga_uart_retry_count < FPGA_UART_MAX_RETRY)
+    {
+      fpga_uart_retry_count++;
+      fpga_uart_state.retry_count = fpga_uart_retry_count;
+      fpga_uart_waiting_ack = 0U;
+      fpga_uart_state.waiting_ack = 0U;
+    }
+    else
+    {
+      fpga_uart_waiting_ack = 0U;
+      fpga_uart_state.waiting_ack = 0U;
+      fpga_uart_queue_count = fpga_uart_queue_index;
+      fpga_uart_retry_count = 0U;
+      fpga_uart_state.retry_count = 0U;
+    }
+  }
+
+  if ((fpga_uart_waiting_ack == 0U) &&
+      ((now - fpga_uart_last_tx_tick) >= FPGA_UART_SEND_PERIOD_MS) &&
       (fpga_uart_queue_index < fpga_uart_queue_count))
+  {
+    should_send = 1U;
+  }
+
+  if (should_send != 0U)
   {
     uint8_t frame[FPGA_UART_FRAME_LEN];
     FpgaUartCommand *command = &fpga_uart_queue[fpga_uart_queue_index];
@@ -228,7 +288,10 @@ void FpgaUart_Task(void)
       fpga_uart_state.tx_count++;
       fpga_uart_state.last_cmd = command->cmd;
       fpga_uart_state.last_data = command->data;
-      fpga_uart_queue_index++;
+      fpga_uart_pending_cmd = command->cmd;
+      fpga_uart_waiting_ack = 1U;
+      fpga_uart_state.waiting_ack = 1U;
+      fpga_uart_last_ack_wait_tick = now;
     }
     else
     {

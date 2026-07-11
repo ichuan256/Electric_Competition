@@ -32,6 +32,11 @@ static uint8_t display_last_apply_counter = 0xFFU;
 static uint8_t display_last_fpga_queue_index = 0xFFU;
 static uint8_t display_last_fpga_queue_count = 0xFFU;
 static uint8_t display_last_fpga_dirty = 0xFFU;
+static uint32_t display_last_fpga_tx_count = 0xFFFFFFFFUL;
+static uint32_t display_last_fpga_rx_count = 0xFFFFFFFFUL;
+static uint32_t display_last_fpga_error_count = 0xFFFFFFFFUL;
+static uint8_t display_last_fpga_ack_cmd = 0xFFU;
+static uint8_t display_last_fpga_ack_status = 0xFFU;
 
 static uint16_t Spectrum_ReadU16(const uint8_t *buf, uint8_t *pos)
 {
@@ -454,7 +459,7 @@ static void Spectrum_DrawInfo(void)
            display_last_rx_size);
   lcd_show_string(8U, DISPLAY_INFO_Y, 464U, 16U, 16U, line, BLACK);
 
-  snprintf(line, sizeof(line), "FPGA CMD:%02X ACK:%02X/%u TX:%lu RX:%lu ERR:%lu Q:%u/%u",
+  snprintf(line, sizeof(line), "FPGA CMD:%02X ACK:%02X/%u TX:%lu RX:%lu ERR:%lu Q:%u/%u W:%u R:%u",
            fpga.last_cmd,
            fpga.last_ack_cmd,
            fpga.last_ack_status,
@@ -462,7 +467,9 @@ static void Spectrum_DrawInfo(void)
            (unsigned long)fpga.rx_count,
            (unsigned long)fpga.error_count,
            fpga.queue_index,
-           fpga.queue_count);
+           fpga.queue_count,
+           fpga.waiting_ack,
+           fpga.retry_count);
   lcd_show_string(8U, 304U, 464U, 16U, 16U, line, BLACK);
 }
 
@@ -523,11 +530,21 @@ void SpectrumDisplay_Task(void)
   fpga_state = FpgaUart_GetState();
   if ((fpga_state.queue_index != display_last_fpga_queue_index) ||
       (fpga_state.queue_count != display_last_fpga_queue_count) ||
-      (fpga_state.dirty_mask != display_last_fpga_dirty))
+      (fpga_state.dirty_mask != display_last_fpga_dirty) ||
+      (fpga_state.tx_count != display_last_fpga_tx_count) ||
+      (fpga_state.rx_count != display_last_fpga_rx_count) ||
+      (fpga_state.error_count != display_last_fpga_error_count) ||
+      (fpga_state.last_ack_cmd != display_last_fpga_ack_cmd) ||
+      (fpga_state.last_ack_status != display_last_fpga_ack_status))
   {
     display_last_fpga_queue_index = fpga_state.queue_index;
     display_last_fpga_queue_count = fpga_state.queue_count;
     display_last_fpga_dirty = fpga_state.dirty_mask;
+    display_last_fpga_tx_count = fpga_state.tx_count;
+    display_last_fpga_rx_count = fpga_state.rx_count;
+    display_last_fpga_error_count = fpga_state.error_count;
+    display_last_fpga_ack_cmd = fpga_state.last_ack_cmd;
+    display_last_fpga_ack_status = fpga_state.last_ack_status;
     display_info_refresh_requested = 1U;
   }
 
