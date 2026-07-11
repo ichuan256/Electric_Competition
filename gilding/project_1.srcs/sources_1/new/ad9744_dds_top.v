@@ -47,11 +47,10 @@ module ad9744_dds_top #(
     wire [7:0] phase_index = phase_acc[47:40];
     wire [13:0] sine_sample = sine_lut_256(phase_index);
     wire signed [14:0] scaled_offset = scaled_signed >>> 13;
-    wire signed [14:0] scaled_abs_signed =
-        scaled_offset[14] ? -scaled_offset : scaled_offset;
-    wire [13:0] scaled_abs = scaled_abs_signed[13:0];
-    wire [12:0] sign_magnitude =
-        (scaled_abs[13] != 1'b0) ? 13'h1FFF : scaled_abs[12:0];
+    wire signed [14:0] twos_limited =
+        (scaled_offset > 15'sd8191)   ? 15'sd8191  :
+        (scaled_offset < -15'sd8192)  ? -15'sd8192 :
+                                        scaled_offset;
     wire dac_clk_forwarded;
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
@@ -72,7 +71,7 @@ module ad9744_dds_top #(
             wave_offset_binary <= sine_sample;
             wave_signed        <= $signed({1'b0, sine_sample}) - 15'sd8192;
             scaled_signed      <= wave_signed * $signed({1'b0, AMPLITUDE});
-            dac_data_r         <= {scaled_offset[14], sign_magnitude};
+            dac_data_r         <= twos_limited[13:0];
 
             if (bit_toggle_cnt == ((CLK_FREQ_HZ / (OUT_FREQ_HZ * 2)) - 1)) begin
                 bit_toggle_cnt  <= 16'd0;
