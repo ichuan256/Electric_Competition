@@ -59,7 +59,7 @@
 #define BOARD_COMM_HEAD2        0x5A
 
 /* ��֡������������ȣ���λ�ֽڡ� */
-#define BOARD_COMM_MAX_PAYLOAD  64
+#define BOARD_COMM_MAX_PAYLOAD  128
 
 /* ���ջ��������ȣ�2 �ֽ�֡ͷ + CMD + LEN + ��� DATA + CHECKSUM�� */
 #define BOARD_COMM_RX_BUF_SIZE  (BOARD_COMM_MAX_PAYLOAD + 5U)

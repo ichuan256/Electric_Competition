@@ -1,55 +1,19 @@
 #include "SpectrumSystem_User.h"
 
-#include "ADF4351_User.h"
-#include "AGC_Controller_User.h"
 #include "BoardComm_User.h"
 
 static SpectrumHostSnapshot spectrum_snapshot;
-static uint16_t spectrum_values_mv[SPECTRUM_POINT_COUNT];
-static uint32_t spectrum_sweep_time_ms = 3000UL;
-static uint32_t spectrum_last_step_tick = 0UL;
-static uint32_t spectrum_sweep_start_tick = 0UL;
-static uint32_t spectrum_adc_request_tick = 0UL;
-static uint8_t spectrum_sweep_started = 0U;
-static uint8_t spectrum_point_phase = 0U;
-static uint8_t spectrum_adc_retry_count = 0U;
-static uint8_t spectrum_lock_demo_high = 0U;
-
-typedef enum {
-  SPECTRUM_UI_FIELD_SWEEP_TIME = 0,
-  SPECTRUM_UI_FIELD_OUTPUT_MV = 1,
-  SPECTRUM_UI_FIELD_FIXED_FREQ = 2,
-  SPECTRUM_UI_FIELD_FPGA_FREQ = 3,
-  SPECTRUM_UI_FIELD_FPGA_PHASE = 4,
-  SPECTRUM_UI_FIELD_FPGA_AMPLITUDE = 5,
-  SPECTRUM_UI_FIELD_FPGA_OFFSET = 6,
-  SPECTRUM_UI_FIELD_FPGA_DUTY = 7,
-  SPECTRUM_UI_FIELD_FPGA_WAVE = 8,
-  SPECTRUM_UI_FIELD_FPGA_ENABLE = 9,
-  SPECTRUM_UI_FIELD_COUNT
-} SpectrumUiField;
-
-static volatile uint8_t spectrum_adc_sample_pending = 0U;
-static volatile uint16_t spectrum_adc_sample_point = 0U;
-static volatile uint16_t spectrum_adc_sample_mv = 0U;
-static volatile int16_t spectrum_adc_sample_dbm_x10 = 0;
-static volatile uint8_t spectrum_adc_sample_valid = 0U;
-
-volatile uint32_t Spectrum_Debug_AdcRespCount = 0U;
-volatile uint32_t Spectrum_Debug_AdcTimeoutCount = 0U;
-volatile uint16_t Spectrum_Debug_LastAdcMv = 0U;
-
-static void Spectrum_StartPllSweep(void);
-static void Spectrum_StartAnalyzer(void);
-static void Spectrum_EnterFixedMode(void);
-static void Spectrum_EnterLockDemoMode(void);
-static void Spectrum_SetPllFrequency(uint32_t frequency_khz, uint16_t point_index);
-static void Spectrum_UiCancelEdit(void);
+static uint32_t spectrum_last_status_tick;
 
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 {
   buf[(*pos)++] = (uint8_t)(value & 0xFFU);
   buf[(*pos)++] = (uint8_t)((value >> 8) & 0xFFU);
+}
+
+static void Spectrum_WriteI16(uint8_t *buf, uint8_t *pos, int16_t value)
+{
+  Spectrum_WriteU16(buf, pos, (uint16_t)value);
 }
 
 static void Spectrum_WriteU32(uint8_t *buf, uint8_t *pos, uint32_t value)
@@ -60,109 +24,39 @@ static void Spectrum_WriteU32(uint8_t *buf, uint8_t *pos, uint32_t value)
   buf[(*pos)++] = (uint8_t)((value >> 24) & 0xFFUL);
 }
 
-static void Spectrum_WriteI16(uint8_t *buf, uint8_t *pos, int16_t value)
-{
-  Spectrum_WriteU16(buf, pos, (uint16_t)value);
-}
-
-static uint16_t Spectrum_ReadU16(const uint8_t *buf, uint8_t *pos)
-{
-  uint16_t value = (uint16_t)buf[*pos];
-  value |= (uint16_t)buf[(uint8_t)(*pos + 1U)] << 8;
-  *pos = (uint8_t)(*pos + 2U);
-  return value;
-}
-
 static uint8_t Spectrum_IsDigit(char key)
 {
   return ((key >= '0') && (key <= '9')) ? 1U : 0U;
 }
 
-static uint8_t Spectrum_UiFieldEditable(SpectrumMode mode, uint8_t field)
+static uint8_t Spectrum_FieldEditable(uint8_t field)
 {
-  if (field >= (uint8_t)SPECTRUM_UI_FIELD_FPGA_FREQ)
-  {
-    return 1U;
-  }
-
-  if (mode == SPECTRUM_MODE_ANALYZER)
-  {
-    return (field == SPECTRUM_UI_FIELD_SWEEP_TIME) ? 1U : 0U;
-  }
-  if (mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
-  {
-    return ((field == SPECTRUM_UI_FIELD_SWEEP_TIME) ||
-            (field == SPECTRUM_UI_FIELD_OUTPUT_MV)) ? 1U : 0U;
-  }
-  if (mode == SPECTRUM_MODE_PLL_FIXED_AGC)
-  {
-    return ((field == SPECTRUM_UI_FIELD_OUTPUT_MV) ||
-            (field == SPECTRUM_UI_FIELD_FIXED_FREQ)) ? 1U : 0U;
-  }
-
-  return 0U;
+  return (field < SPECTRUM_SUM_FIELD_COUNT) ? 1U : 0U;
 }
 
-static uint8_t Spectrum_UiHasEditableField(SpectrumMode mode)
-{
-  for (uint8_t field = 0U; field < (uint8_t)SPECTRUM_UI_FIELD_COUNT; field++)
-  {
-    if (Spectrum_UiFieldEditable(mode, field) != 0U)
-    {
-      return 1U;
-    }
-  }
-  return 0U;
-}
-
-static void Spectrum_UiNormalizeFocus(void)
-{
-  if (Spectrum_UiHasEditableField(spectrum_snapshot.mode) == 0U)
-  {
-    spectrum_snapshot.ui_focus = (uint8_t)SPECTRUM_UI_FIELD_COUNT;
-    Spectrum_UiCancelEdit();
-    return;
-  }
-
-  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) != 0U)
-  {
-    return;
-  }
-
-  for (uint8_t field = 0U; field < (uint8_t)SPECTRUM_UI_FIELD_COUNT; field++)
-  {
-    if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, field) != 0U)
-    {
-      spectrum_snapshot.ui_focus = field;
-      return;
-    }
-  }
-}
-
-static void Spectrum_UiClearInput(void)
+static void Spectrum_ClearInput(void)
 {
   spectrum_snapshot.ui_input_len = 0U;
   spectrum_snapshot.ui_input[0] = '\0';
 }
 
-static void Spectrum_UiStartEdit(void)
+static void Spectrum_StartEdit(void)
 {
-  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
+  if (Spectrum_FieldEditable(spectrum_snapshot.ui_focus) == 0U)
   {
     return;
   }
-
   spectrum_snapshot.ui_editing = 1U;
-  Spectrum_UiClearInput();
+  Spectrum_ClearInput();
 }
 
-static void Spectrum_UiCancelEdit(void)
+static void Spectrum_CancelEdit(void)
 {
   spectrum_snapshot.ui_editing = 0U;
-  Spectrum_UiClearInput();
+  Spectrum_ClearInput();
 }
 
-static void Spectrum_UiAppendInput(char key)
+static void Spectrum_AppendInput(char key)
 {
   if (key == '#')
   {
@@ -174,9 +68,17 @@ static void Spectrum_UiAppendInput(char key)
     return;
   }
 
-  if ((Spectrum_IsDigit(key) == 0U) && (key != '.'))
+  if ((Spectrum_IsDigit(key) == 0U) && (key != '.') && (key != '-'))
   {
     return;
+  }
+
+  if (key == '-')
+  {
+    if (spectrum_snapshot.ui_input_len != 0U)
+    {
+      return;
+    }
   }
 
   if (key == '.')
@@ -194,18 +96,44 @@ static void Spectrum_UiAppendInput(char key)
   spectrum_snapshot.ui_input[spectrum_snapshot.ui_input_len] = '\0';
 }
 
-static void Spectrum_UiBackspace(void)
+static void Spectrum_Backspace(void)
 {
   if (spectrum_snapshot.ui_input_len == 0U)
   {
     return;
   }
-
   spectrum_snapshot.ui_input_len--;
   spectrum_snapshot.ui_input[spectrum_snapshot.ui_input_len] = '\0';
 }
 
-static uint32_t Spectrum_UiParseInputX1000(uint8_t *valid, uint8_t *has_decimal)
+static void Spectrum_ToggleNegativeInput(void)
+{
+  if (spectrum_snapshot.ui_focus != 10U)
+  {
+    return;
+  }
+
+  if ((spectrum_snapshot.ui_input_len > 0U) && (spectrum_snapshot.ui_input[0] == '-'))
+  {
+    for (uint8_t i = 0U; i < spectrum_snapshot.ui_input_len; i++)
+    {
+      spectrum_snapshot.ui_input[i] = spectrum_snapshot.ui_input[(uint8_t)(i + 1U)];
+    }
+    spectrum_snapshot.ui_input_len--;
+  }
+  else if (spectrum_snapshot.ui_input_len < SPECTRUM_UI_INPUT_MAX_LEN)
+  {
+    for (uint8_t i = spectrum_snapshot.ui_input_len; i > 0U; i--)
+    {
+      spectrum_snapshot.ui_input[i] = spectrum_snapshot.ui_input[(uint8_t)(i - 1U)];
+    }
+    spectrum_snapshot.ui_input[0] = '-';
+    spectrum_snapshot.ui_input_len++;
+    spectrum_snapshot.ui_input[spectrum_snapshot.ui_input_len] = '\0';
+  }
+}
+
+static uint32_t Spectrum_ParseInputX1000(uint8_t *valid, uint8_t *has_decimal)
 {
   uint32_t integer_part = 0UL;
   uint32_t fraction_part = 0UL;
@@ -213,14 +141,8 @@ static uint32_t Spectrum_UiParseInputX1000(uint8_t *valid, uint8_t *has_decimal)
   uint8_t decimal_seen = 0U;
   uint8_t digit_seen = 0U;
 
-  if (valid != 0)
-  {
-    *valid = 0U;
-  }
-  if (has_decimal != 0)
-  {
-    *has_decimal = 0U;
-  }
+  *valid = 0U;
+  *has_decimal = 0U;
 
   for (uint8_t i = 0U; i < spectrum_snapshot.ui_input_len; i++)
   {
@@ -260,69 +182,48 @@ static uint32_t Spectrum_UiParseInputX1000(uint8_t *valid, uint8_t *has_decimal)
     fraction_scale *= 10UL;
   }
 
-  if (valid != 0)
-  {
-    *valid = 1U;
-  }
-  if (has_decimal != 0)
-  {
-    *has_decimal = decimal_seen;
-  }
+  *valid = 1U;
+  *has_decimal = decimal_seen;
   return (integer_part * 1000UL) + fraction_part;
 }
 
-static void Spectrum_UiMoveFocus(int8_t step)
+static int32_t Spectrum_ParseSignedInputX1000(uint8_t *valid, uint8_t *has_decimal)
 {
-  int8_t focus;
+  uint8_t negative = 0U;
+  uint8_t original_len = spectrum_snapshot.ui_input_len;
+  uint32_t value;
 
-  if (Spectrum_UiHasEditableField(spectrum_snapshot.mode) == 0U)
+  if ((spectrum_snapshot.ui_input_len > 0U) && (spectrum_snapshot.ui_input[0] == '-'))
   {
-    spectrum_snapshot.ui_focus = (uint8_t)SPECTRUM_UI_FIELD_COUNT;
-    Spectrum_UiCancelEdit();
-    return;
+    negative = 1U;
+    for (uint8_t i = 0U; i < (uint8_t)(spectrum_snapshot.ui_input_len - 1U); i++)
+    {
+      spectrum_snapshot.ui_input[i] = spectrum_snapshot.ui_input[(uint8_t)(i + 1U)];
+    }
+    spectrum_snapshot.ui_input_len--;
   }
 
-  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
+  value = Spectrum_ParseInputX1000(valid, has_decimal);
+
+  if (negative != 0U)
   {
-    Spectrum_UiNormalizeFocus();
-    return;
+    for (uint8_t i = spectrum_snapshot.ui_input_len; i > 0U; i--)
+    {
+      spectrum_snapshot.ui_input[i] = spectrum_snapshot.ui_input[(uint8_t)(i - 1U)];
+    }
+    spectrum_snapshot.ui_input[0] = '-';
+    spectrum_snapshot.ui_input_len = original_len;
   }
 
-  focus = (int8_t)spectrum_snapshot.ui_focus;
-
-  do
+  if (*valid == 0U)
   {
-    focus += step;
-    if (focus < 0)
-    {
-      focus = (int8_t)SPECTRUM_UI_FIELD_COUNT - 1;
-    }
-    else if (focus >= (int8_t)SPECTRUM_UI_FIELD_COUNT)
-    {
-      focus = 0;
-    }
-  } while (Spectrum_UiFieldEditable(spectrum_snapshot.mode, (uint8_t)focus) == 0U);
+    return 0;
+  }
 
-  spectrum_snapshot.ui_focus = (uint8_t)focus;
+  return (negative != 0U) ? -(int32_t)value : (int32_t)value;
 }
 
-static void Spectrum_SetSweepTimeMs(uint32_t sweep_time_ms)
-{
-  if (sweep_time_ms < SPECTRUM_SWEEP_TIME_MIN_MS)
-  {
-    sweep_time_ms = SPECTRUM_SWEEP_TIME_MIN_MS;
-  }
-  else if (sweep_time_ms > SPECTRUM_SWEEP_TIME_MAX_MS)
-  {
-    sweep_time_ms = SPECTRUM_SWEEP_TIME_MAX_MS;
-  }
-
-  spectrum_sweep_time_ms = sweep_time_ms;
-  spectrum_snapshot.sweep_time_s = (uint8_t)((sweep_time_ms + 500UL) / 1000UL);
-  spectrum_snapshot.ui_sweep_time_ms = (uint16_t)sweep_time_ms;
-}
-
-static uint32_t Spectrum_UiParseFrequencyHz(uint32_t value_x1000, uint8_t has_decimal)
+static uint32_t Spectrum_ParseFrequencyHz(uint32_t value_x1000, uint8_t has_decimal)
 {
   uint32_t integer_part = value_x1000 / 1000UL;
   uint32_t frequency_hz;
@@ -348,216 +249,175 @@ static uint32_t Spectrum_UiParseFrequencyHz(uint32_t value_x1000, uint8_t has_de
   return frequency_hz;
 }
 
-static void Spectrum_SetFpgaField(uint32_t value_x1000, uint8_t has_decimal)
+static void Spectrum_MoveFocusHorizontal(int8_t step)
 {
-  uint32_t value = (value_x1000 + 500UL) / 1000UL;
+  uint8_t first;
+  uint8_t count;
+  int8_t offset;
 
-  if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_FREQ)
+  if (spectrum_snapshot.ui_focus < 6U)
   {
-    spectrum_snapshot.fpga_frequency_hz = Spectrum_UiParseFrequencyHz(value_x1000, has_decimal);
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_PHASE)
-  {
-    spectrum_snapshot.fpga_phase_deg = (uint16_t)(value % 360UL);
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_AMPLITUDE)
-  {
-    if (value > 8191UL)
-    {
-      value = 8191UL;
-    }
-    spectrum_snapshot.fpga_amplitude_code = (uint16_t)value;
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_OFFSET)
-  {
-    if (value > 8191UL)
-    {
-      value = 8191UL;
-    }
-    spectrum_snapshot.fpga_offset_code = (int16_t)value;
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_DUTY)
-  {
-    if (value <= 100UL)
-    {
-      spectrum_snapshot.fpga_duty_code = (uint16_t)((value * 65535UL + 50UL) / 100UL);
-    }
-    else
-    {
-      if (value > 65535UL)
-      {
-        value = 65535UL;
-      }
-      spectrum_snapshot.fpga_duty_code = (uint16_t)value;
-    }
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_WAVE)
-  {
-    if (value > 3UL)
-    {
-      value = 3UL;
-    }
-    spectrum_snapshot.fpga_waveform = (uint8_t)value;
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FPGA_ENABLE)
-  {
-    spectrum_snapshot.fpga_output_enable = (value != 0UL) ? 1U : 0U;
-  }
-}
-
-static void Spectrum_RestartCurrentMode(void)
-{
-  if (spectrum_snapshot.mode == SPECTRUM_MODE_ANALYZER)
-  {
-    Spectrum_StartAnalyzer();
-  }
-  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
-  {
-    Spectrum_StartPllSweep();
-  }
-  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_FIXED_AGC)
-  {
-    Spectrum_EnterFixedMode();
+    first = 0U;
+    count = 6U;
   }
   else
   {
-    Spectrum_EnterLockDemoMode();
+    first = 6U;
+    count = 5U;
+  }
+
+  offset = (int8_t)(spectrum_snapshot.ui_focus - first);
+  offset += step;
+  if (offset < 0)
+  {
+    offset = (int8_t)(count - 1U);
+  }
+  else if (offset >= (int8_t)count)
+  {
+    offset = 0;
+  }
+
+  spectrum_snapshot.ui_focus = (uint8_t)(first + (uint8_t)offset);
+}
+
+static void Spectrum_MoveFocusVertical(void)
+{
+  uint8_t focus = spectrum_snapshot.ui_focus;
+
+  if (focus < 6U)
+  {
+    focus = (uint8_t)(focus + 6U);
+    if (focus >= SPECTRUM_SUM_FIELD_COUNT)
+    {
+      focus = (uint8_t)(SPECTRUM_SUM_FIELD_COUNT - 1U);
+    }
+  }
+  else
+  {
+    focus = (uint8_t)(focus - 6U);
+  }
+
+  spectrum_snapshot.ui_focus = focus;
+}
+
+static void Spectrum_SelectWave(uint8_t wave)
+{
+  if (wave >= SPECTRUM_SUM_MAX_WAVES)
+  {
+    wave = (uint8_t)(SPECTRUM_SUM_MAX_WAVES - 1U);
+  }
+  spectrum_snapshot.selected_wave = wave;
+  if (spectrum_snapshot.wave_count <= wave)
+  {
+    spectrum_snapshot.wave_count = (uint8_t)(wave + 1U);
   }
 }
 
-static void Spectrum_UiCommitInput(void)
+static void Spectrum_CommitInput(void)
 {
   uint8_t valid;
   uint8_t has_decimal;
-  uint32_t value_x1000 = Spectrum_UiParseInputX1000(&valid, &has_decimal);
+  uint32_t value_x1000 = Spectrum_ParseInputX1000(&valid, &has_decimal);
+  uint32_t value = (value_x1000 + 500UL) / 1000UL;
+  int32_t signed_value_x1000;
+  int32_t signed_value;
+  SpectrumWaveConfig *wave = &spectrum_snapshot.waves[spectrum_snapshot.selected_wave];
 
-  if (Spectrum_UiFieldEditable(spectrum_snapshot.mode, spectrum_snapshot.ui_focus) == 0U)
+  if ((valid == 0U) && (spectrum_snapshot.ui_focus != 10U))
   {
-    Spectrum_UiCancelEdit();
+    Spectrum_CancelEdit();
     return;
   }
 
-  if (valid == 0U)
+  switch (spectrum_snapshot.ui_focus)
   {
-    Spectrum_UiCancelEdit();
-    if (spectrum_snapshot.ui_focus <= (uint8_t)SPECTRUM_UI_FIELD_FIXED_FREQ)
-    {
-      Spectrum_RestartCurrentMode();
-    }
-    return;
+    case 0U:
+      if (value < 1UL) { value = 1UL; }
+      if (value > SPECTRUM_SUM_MAX_WAVES) { value = SPECTRUM_SUM_MAX_WAVES; }
+      spectrum_snapshot.wave_count = (uint8_t)value;
+      if (spectrum_snapshot.selected_wave >= spectrum_snapshot.wave_count)
+      {
+        spectrum_snapshot.selected_wave = (uint8_t)(spectrum_snapshot.wave_count - 1U);
+      }
+      break;
+    case 1U:
+      spectrum_snapshot.channel_id = (value != 0UL) ? 1U : 0U;
+      break;
+    case 2U:
+      if (value > 0UL) { value--; }
+      Spectrum_SelectWave((uint8_t)value);
+      break;
+    case 3U:
+      wave->frequency_hz = Spectrum_ParseFrequencyHz(value_x1000, has_decimal);
+      break;
+    case 4U:
+      wave->phase_deg = (uint16_t)(value % 360UL);
+      break;
+    case 5U:
+      if (value > 8191UL) { value = 8191UL; }
+      wave->amplitude_code = (uint16_t)value;
+      break;
+    case 6U:
+      if (value > 8191UL) { value = 8191UL; }
+      wave->offset_code = (int16_t)value;
+      break;
+    case 7U:
+      if (value <= 100UL)
+      {
+        wave->duty_code = (uint16_t)((value * 65535UL + 50UL) / 100UL);
+      }
+      else
+      {
+        if (value > 65535UL) { value = 65535UL; }
+        wave->duty_code = (uint16_t)value;
+      }
+      break;
+    case 8U:
+      if (value > 3UL) { value = 3UL; }
+      wave->waveform = (uint8_t)value;
+      break;
+    case 9U:
+      wave->enable = (value != 0UL) ? 1U : 0U;
+      break;
+    case 10U:
+      signed_value_x1000 = Spectrum_ParseSignedInputX1000(&valid, &has_decimal);
+      if (valid == 0U)
+      {
+        Spectrum_CancelEdit();
+        return;
+      }
+      signed_value = (signed_value_x1000 >= 0) ?
+                     ((signed_value_x1000 + 500) / 1000) :
+                     ((signed_value_x1000 - 500) / 1000);
+      if (signed_value > 5000)
+      {
+        signed_value = 5000;
+      }
+      else if (signed_value < -5000)
+      {
+        signed_value = -5000;
+      }
+      spectrum_snapshot.output_bias_mv = (int16_t)signed_value;
+      break;
+    default:
+      break;
   }
 
-  if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_SWEEP_TIME)
-  {
-    Spectrum_SetSweepTimeMs(value_x1000);
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_OUTPUT_MV)
-  {
-    uint32_t target_mv = (value_x1000 + 500UL) / 1000UL;
-    if (target_mv < AGC_TARGET_MIN_MV)
-    {
-      target_mv = AGC_TARGET_MIN_MV;
-    }
-    else if (target_mv > AGC_TARGET_MAX_MV)
-    {
-      target_mv = AGC_TARGET_MAX_MV;
-    }
-    AGC_Controller_SetTarget((uint16_t)target_mv);
-  }
-  else if (spectrum_snapshot.ui_focus == SPECTRUM_UI_FIELD_FIXED_FREQ)
-  {
-    uint32_t frequency_khz;
-
-    if ((has_decimal == 0U) && ((value_x1000 / 1000UL) >= 1000UL))
-    {
-      frequency_khz = value_x1000 / 1000UL;
-    }
-    else
-    {
-      frequency_khz = value_x1000;
-    }
-
-    if (frequency_khz < PLL_SWEEP_START_KHZ)
-    {
-      frequency_khz = PLL_SWEEP_START_KHZ;
-    }
-    else if (frequency_khz > PLL_SWEEP_STOP_KHZ)
-    {
-      frequency_khz = PLL_SWEEP_STOP_KHZ;
-    }
-
-    spectrum_snapshot.fixed_frequency_khz = frequency_khz;
-  }
-  else
-  {
-    Spectrum_SetFpgaField(value_x1000, has_decimal);
-  }
-
-  Spectrum_UiCancelEdit();
-  if (spectrum_snapshot.ui_focus <= (uint8_t)SPECTRUM_UI_FIELD_FIXED_FREQ)
-  {
-    Spectrum_RestartCurrentMode();
-  }
-}
-
-static uint32_t Spectrum_AnalyzerIndexToRfKHz(uint16_t index)
-{
-  return SPECTRUM_RF_START_KHZ + ((uint32_t)index * SPECTRUM_STEP_KHZ);
-}
-
-static uint32_t Spectrum_RfToLoKHz(uint32_t rf_khz)
-{
-  return rf_khz + SPECTRUM_IF_KHZ;
-}
-
-static uint32_t Spectrum_PllIndexToKHz(uint16_t index)
-{
-  return PLL_SWEEP_START_KHZ + ((uint32_t)index * PLL_SWEEP_STEP_KHZ);
-}
-
-static void Spectrum_UpdateAgcSnapshot(void)
-{
-  AGC_ControllerState agc = AGC_Controller_GetState();
-
-  spectrum_snapshot.agc_target_mv = agc.target_mv;
-  spectrum_snapshot.agc_control_mv = agc.control_mv;
-  spectrum_snapshot.agc_output_connected = agc.output_connected;
-}
-
-static void Spectrum_SendAdcSampleRequest(void)
-{
-  uint8_t payload[10];
-  uint8_t pos = 0U;
-
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.point_index);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.rf_khz);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.lo_khz);
-  (void)BoardComm_Send(BOARD_COMM_CMD_ADC_SAMPLE_REQ, payload, pos);
-  spectrum_adc_request_tick = HAL_GetTick();
+  spectrum_snapshot.apply_counter++;
+  spectrum_snapshot.state = SPECTRUM_HOST_READY;
+  Spectrum_CancelEdit();
 }
 
 static void Spectrum_SendStatus(void)
 {
-  uint8_t payload[64];
+  uint8_t payload[128];
   uint8_t pos = 0U;
 
-  Spectrum_UpdateAgcSnapshot();
-  payload[pos++] = (uint8_t)spectrum_snapshot.mode;
+  payload[pos++] = spectrum_snapshot.mode;
   payload[pos++] = (uint8_t)spectrum_snapshot.state;
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.rf_khz);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.lo_khz);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.point_index);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.amplitude_mv);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.peak_index);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.peak_amplitude_mv);
-  payload[pos++] = spectrum_snapshot.spur_count;
-  payload[pos++] = spectrum_snapshot.pll_locked;
-  payload[pos++] = spectrum_snapshot.sweep_time_s;
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.active_point_count);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.fixed_frequency_khz);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.agc_target_mv);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.agc_control_mv);
-  payload[pos++] = spectrum_snapshot.agc_output_connected;
+  payload[pos++] = spectrum_snapshot.channel_id;
+  payload[pos++] = spectrum_snapshot.wave_count;
+  payload[pos++] = spectrum_snapshot.selected_wave;
   payload[pos++] = spectrum_snapshot.ui_focus;
   payload[pos++] = spectrum_snapshot.ui_editing;
   payload[pos++] = spectrum_snapshot.ui_input_len;
@@ -565,486 +425,129 @@ static void Spectrum_SendStatus(void)
   {
     payload[pos++] = (uint8_t)spectrum_snapshot.ui_input[i];
   }
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.ui_sweep_time_ms);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.fpga_frequency_hz);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.fpga_phase_deg);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.fpga_amplitude_code);
-  Spectrum_WriteI16(payload, &pos, spectrum_snapshot.fpga_offset_code);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.fpga_duty_code);
-  payload[pos++] = spectrum_snapshot.fpga_waveform;
-  payload[pos++] = spectrum_snapshot.fpga_output_enable;
+  payload[pos++] = spectrum_snapshot.apply_counter;
+
+  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
+  {
+    SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
+    Spectrum_WriteU32(payload, &pos, wave->frequency_hz);
+    Spectrum_WriteU16(payload, &pos, wave->phase_deg);
+    Spectrum_WriteU16(payload, &pos, wave->amplitude_code);
+    Spectrum_WriteI16(payload, &pos, wave->offset_code);
+    Spectrum_WriteU16(payload, &pos, wave->duty_code);
+    payload[pos++] = wave->waveform;
+    payload[pos++] = wave->enable;
+  }
+  Spectrum_WriteI16(payload, &pos, spectrum_snapshot.output_bias_mv);
+
   (void)BoardComm_Send(BOARD_COMM_CMD_SYS_STATUS, payload, pos);
 }
 
-static void Spectrum_SendPoint(void)
+static void Spectrum_LoadDefaults(void)
 {
-  uint8_t payload[9];
-  uint8_t pos = 0U;
+  spectrum_snapshot.mode = 0U;
+  spectrum_snapshot.state = SPECTRUM_HOST_READY;
+  spectrum_snapshot.channel_id = 0U;
+  spectrum_snapshot.wave_count = 2U;
+  spectrum_snapshot.selected_wave = 0U;
+  spectrum_snapshot.ui_focus = 3U;
+  spectrum_snapshot.ui_editing = 0U;
+  spectrum_snapshot.apply_counter = 1U;
+  spectrum_snapshot.output_bias_mv = 0;
+  Spectrum_ClearInput();
 
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.point_index);
-  Spectrum_WriteU32(payload, &pos, spectrum_snapshot.rf_khz);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.amplitude_mv);
-  payload[pos++] = spectrum_snapshot.pll_locked;
-  (void)BoardComm_Send(BOARD_COMM_CMD_SWEEP_POINT, payload, pos);
-}
-
-static void Spectrum_SendResult(void)
-{
-  uint8_t payload[5];
-  uint8_t pos = 0U;
-
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.peak_index);
-  Spectrum_WriteU16(payload, &pos, spectrum_snapshot.peak_amplitude_mv);
-  payload[pos++] = spectrum_snapshot.spur_count;
-  (void)BoardComm_Send(BOARD_COMM_CMD_SWEEP_RESULT, payload, pos);
-}
-
-static void Spectrum_UpdatePeakAndSpur(void)
-{
-  uint16_t peak = 0U;
-  uint16_t peak_value = 0U;
-  int32_t peak_dbm_x10;
-  int32_t spur_threshold_dbm_x10;
-  uint8_t spur_count = 0U;
-
-  for (uint16_t i = 0U; i < SPECTRUM_POINT_COUNT; i++)
+  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
   {
-    if (spectrum_values_mv[i] > peak_value)
-    {
-      peak_value = spectrum_values_mv[i];
-      peak = i;
-    }
+    spectrum_snapshot.waves[i].frequency_hz = 1000000UL + ((uint32_t)i * 100000UL);
+    spectrum_snapshot.waves[i].phase_deg = 0U;
+    spectrum_snapshot.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
+    spectrum_snapshot.waves[i].offset_code = 0;
+    spectrum_snapshot.waves[i].duty_code = 32768U;
+    spectrum_snapshot.waves[i].waveform = 0U;
+    spectrum_snapshot.waves[i].enable = (i < 2U) ? 1U : 0U;
   }
-
-  if (peak_value != 0U)
-  {
-    peak_dbm_x10 = (((int32_t)peak_value * 10) / 25) - 840;
-    spur_threshold_dbm_x10 = peak_dbm_x10 - SPECTRUM_SPUR_THRESHOLD_DB_X10;
-
-    for (uint16_t i = 0U; i < SPECTRUM_POINT_COUNT; i++)
-    {
-      int32_t point_dbm_x10 = (((int32_t)spectrum_values_mv[i] * 10) / 25) - 840;
-
-      /* Exclude the main bin. The 2% threshold is applied in the detector's
-       * pre-log linear domain, which is equivalent to peak - 16.99 dB. */
-      if ((i != peak) &&
-          (point_dbm_x10 > spur_threshold_dbm_x10) &&
-          (spur_count < 255U))
-      {
-        spur_count++;
-      }
-    }
-  }
-
-  spectrum_snapshot.peak_index = peak;
-  spectrum_snapshot.peak_amplitude_mv = peak_value;
-  spectrum_snapshot.spur_count = spur_count;
-}
-
-static void Spectrum_SetAnalyzerPoint(uint16_t index)
-{
-  uint32_t rf_khz = Spectrum_AnalyzerIndexToRfKHz(index);
-  uint32_t lo_khz = Spectrum_RfToLoKHz(rf_khz);
-
-  spectrum_snapshot.point_index = index;
-  spectrum_snapshot.rf_khz = rf_khz;
-  spectrum_snapshot.lo_khz = lo_khz;
-  spectrum_snapshot.pll_locked = 1U;
-  ADF4351_SetFreq(lo_khz / 100UL);
-}
-
-static void Spectrum_SetPllFrequency(uint32_t frequency_khz, uint16_t point_index)
-{
-  spectrum_snapshot.point_index = point_index;
-  spectrum_snapshot.rf_khz = frequency_khz;
-  spectrum_snapshot.lo_khz = frequency_khz;
-  spectrum_snapshot.pll_locked = 1U;
-  ADF4351_SetFreq(frequency_khz / 100UL);
-}
-
-static void Spectrum_StartAnalyzer(void)
-{
-  for (uint16_t i = 0U; i < SPECTRUM_POINT_COUNT; i++)
-  {
-    spectrum_values_mv[i] = 0U;
-  }
-
-  spectrum_snapshot.mode = SPECTRUM_MODE_ANALYZER;
-  Spectrum_UiNormalizeFocus();
-  spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
-  spectrum_snapshot.active_point_count = SPECTRUM_POINT_COUNT;
-  spectrum_snapshot.point_index = 0U;
-  spectrum_snapshot.peak_index = 0U;
-  spectrum_snapshot.peak_amplitude_mv = 0U;
-  spectrum_snapshot.spur_count = 0U;
-  spectrum_sweep_started = 1U;
-  spectrum_point_phase = 0U;
-  spectrum_adc_retry_count = 0U;
-  spectrum_last_step_tick = 0UL;
-  spectrum_adc_sample_pending = 0U;
-}
-
-static void Spectrum_StartPllSweep(void)
-{
-  spectrum_snapshot.mode = SPECTRUM_MODE_PLL_SWEEP_AGC;
-  Spectrum_UiNormalizeFocus();
-  spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
-  spectrum_snapshot.active_point_count = PLL_SWEEP_POINT_COUNT;
-  spectrum_snapshot.point_index = 0U;
-  spectrum_snapshot.peak_index = 0U;
-  spectrum_snapshot.peak_amplitude_mv = 0U;
-  spectrum_snapshot.spur_count = 0U;
-  spectrum_sweep_start_tick = HAL_GetTick();
-  spectrum_last_step_tick = 0UL;
-  spectrum_sweep_started = 1U;
-  Spectrum_SetPllFrequency(PLL_SWEEP_START_KHZ, 0U);
-  Spectrum_SendAdcSampleRequest();
-  Spectrum_SendStatus();
-}
-
-static void Spectrum_EnterFixedMode(void)
-{
-  spectrum_snapshot.mode = SPECTRUM_MODE_PLL_FIXED_AGC;
-  Spectrum_UiNormalizeFocus();
-  spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
-  spectrum_snapshot.active_point_count = 1U;
-  spectrum_snapshot.point_index = 0U;
-  spectrum_sweep_started = 0U;
-  spectrum_last_step_tick = HAL_GetTick();
-  Spectrum_SetPllFrequency(spectrum_snapshot.fixed_frequency_khz, 0U);
-  Spectrum_SendAdcSampleRequest();
-  Spectrum_SendStatus();
-}
-
-static void Spectrum_EnterLockDemoMode(void)
-{
-  spectrum_snapshot.mode = SPECTRUM_MODE_PLL_LOCK_DEMO;
-  Spectrum_UiNormalizeFocus();
-  spectrum_snapshot.state = SPECTRUM_HOST_SWEEPING;
-  spectrum_snapshot.active_point_count = 2U;
-  spectrum_snapshot.point_index = 0U;
-  spectrum_sweep_started = 0U;
-  spectrum_lock_demo_high = 0U;
-  spectrum_last_step_tick = HAL_GetTick();
-  Spectrum_SetPllFrequency(PLL_SWEEP_START_KHZ, 0U);
-  Spectrum_SendStatus();
-}
-
-static void Spectrum_FinishAnalyzerPoint(uint16_t amplitude_mv)
-{
-  spectrum_snapshot.amplitude_mv = amplitude_mv;
-  spectrum_values_mv[spectrum_snapshot.point_index] = amplitude_mv;
-
-  if (amplitude_mv > spectrum_snapshot.peak_amplitude_mv)
-  {
-    spectrum_snapshot.peak_amplitude_mv = amplitude_mv;
-    spectrum_snapshot.peak_index = spectrum_snapshot.point_index;
-  }
-
-  Spectrum_SendPoint();
-  if ((spectrum_snapshot.point_index % 10U) == 0U)
-  {
-    Spectrum_SendStatus();
-  }
-
-  if (spectrum_snapshot.point_index >= (SPECTRUM_POINT_COUNT - 1U))
-  {
-    Spectrum_UpdatePeakAndSpur();
-    spectrum_snapshot.state = SPECTRUM_HOST_DONE;
-    spectrum_sweep_started = 0U;
-    spectrum_point_phase = 0U;
-    Spectrum_SendStatus();
-    Spectrum_SendResult();
-  }
-  else
-  {
-    spectrum_snapshot.point_index++;
-    spectrum_point_phase = 0U;
-  }
-}
-
-static void Spectrum_AnalyzerTask(uint32_t now)
-{
-  uint32_t dwell_ms = spectrum_sweep_time_ms / SPECTRUM_POINT_COUNT;
-  uint8_t has_sample = 0U;
-  uint16_t sample_point = 0U;
-  uint16_t sample_mv = 0U;
-  uint8_t sample_valid = 0U;
-
-  if (dwell_ms == 0UL)
-  {
-    dwell_ms = 1UL;
-  }
-
-  if (spectrum_snapshot.state != SPECTRUM_HOST_SWEEPING)
-  {
-    return;
-  }
-
-  if (spectrum_point_phase == 0U)
-  {
-    if ((spectrum_last_step_tick != 0UL) && ((now - spectrum_last_step_tick) < dwell_ms))
-    {
-      return;
-    }
-    spectrum_last_step_tick = now;
-    Spectrum_SetAnalyzerPoint(spectrum_snapshot.point_index);
-    spectrum_adc_retry_count = 0U;
-    spectrum_point_phase = 1U;
-    return;
-  }
-
-  if (spectrum_point_phase == 1U)
-  {
-    if ((now - spectrum_last_step_tick) < SPECTRUM_ADC_SETTLE_MS)
-    {
-      return;
-    }
-    Spectrum_SendAdcSampleRequest();
-    spectrum_point_phase = 2U;
-    return;
-  }
-
-  __disable_irq();
-  if (spectrum_adc_sample_pending != 0U)
-  {
-    has_sample = 1U;
-    sample_point = spectrum_adc_sample_point;
-    sample_mv = spectrum_adc_sample_mv;
-    sample_valid = spectrum_adc_sample_valid;
-    spectrum_adc_sample_pending = 0U;
-  }
-  __enable_irq();
-
-  if ((has_sample != 0U) && (sample_point == spectrum_snapshot.point_index))
-  {
-    Spectrum_Debug_LastAdcMv = sample_mv;
-    Spectrum_FinishAnalyzerPoint((sample_valid != 0U) ? sample_mv : 0U);
-  }
-  else if ((now - spectrum_adc_request_tick) >= SPECTRUM_ADC_TIMEOUT_MS)
-  {
-    if (spectrum_adc_retry_count < SPECTRUM_ADC_MAX_RETRIES)
-    {
-      spectrum_adc_retry_count++;
-      Spectrum_SendAdcSampleRequest();
-    }
-    else
-    {
-      Spectrum_Debug_AdcTimeoutCount++;
-      Spectrum_FinishAnalyzerPoint(0U);
-    }
-  }
-}
-
-static void Spectrum_PllSweepTask(uint32_t now)
-{
-  uint32_t elapsed = now - spectrum_sweep_start_tick;
-  uint16_t next_index;
-
-  if (elapsed >= spectrum_sweep_time_ms)
-  {
-    Spectrum_SetPllFrequency(PLL_SWEEP_STOP_KHZ, (PLL_SWEEP_POINT_COUNT - 1U));
-    Spectrum_SendPoint();
-    spectrum_sweep_start_tick = now;
-    spectrum_last_step_tick = 0UL;
-    return;
-  }
-
-  next_index = (uint16_t)(((uint64_t)elapsed * (PLL_SWEEP_POINT_COUNT - 1U)) / spectrum_sweep_time_ms);
-  if ((spectrum_last_step_tick == 0UL) || (next_index != spectrum_snapshot.point_index))
-  {
-    Spectrum_SetPllFrequency(Spectrum_PllIndexToKHz(next_index), next_index);
-    spectrum_last_step_tick = now;
-    Spectrum_SendAdcSampleRequest();
-    Spectrum_SendPoint();
-    if ((next_index % 20U) == 0U)
-    {
-      Spectrum_SendStatus();
-    }
-  }
-}
-
-static void Spectrum_FixedTask(uint32_t now)
-{
-  if ((now - spectrum_last_step_tick) >= PLL_AGC_SAMPLE_PERIOD_MS)
-  {
-    spectrum_last_step_tick = now;
-    Spectrum_SendAdcSampleRequest();
-  }
-}
-
-static void Spectrum_LockDemoTask(uint32_t now)
-{
-  if ((now - spectrum_last_step_tick) < PLL_LOCK_DEMO_PERIOD_MS)
-  {
-    return;
-  }
-
-  spectrum_last_step_tick = now;
-  spectrum_lock_demo_high ^= 1U;
-  if (spectrum_lock_demo_high != 0U)
-  {
-    Spectrum_SetPllFrequency(PLL_SWEEP_STOP_KHZ, 1U);
-  }
-  else
-  {
-    Spectrum_SetPllFrequency(PLL_SWEEP_START_KHZ, 0U);
-  }
-  Spectrum_SendStatus();
 }
 
 void SpectrumSystem_Init(void)
 {
-  AGC_Controller_Init();
-  spectrum_snapshot.ui_focus = SPECTRUM_UI_FIELD_SWEEP_TIME;
-  spectrum_snapshot.ui_editing = 0U;
-  Spectrum_UiClearInput();
-  Spectrum_SetSweepTimeMs(3000UL);
-  spectrum_snapshot.fixed_frequency_khz = PLL_FIXED_DEFAULT_KHZ;
-  spectrum_snapshot.fpga_frequency_hz = 1000000UL;
-  spectrum_snapshot.fpga_phase_deg = 0U;
-  spectrum_snapshot.fpga_amplitude_code = 8191U;
-  spectrum_snapshot.fpga_offset_code = 0;
-  spectrum_snapshot.fpga_duty_code = 32768U;
-  spectrum_snapshot.fpga_waveform = 0U;
-  spectrum_snapshot.fpga_output_enable = 1U;
-  spectrum_snapshot.amplitude_mv = 0U;
-  spectrum_snapshot.pll_locked = 0U;
-  Spectrum_UpdateAgcSnapshot();
-  Spectrum_StartAnalyzer();
+  Spectrum_LoadDefaults();
+  spectrum_last_status_tick = HAL_GetTick();
+  Spectrum_SendStatus();
 }
 
 void SpectrumSystem_Task(void)
 {
   uint32_t now = HAL_GetTick();
-
-  if (spectrum_snapshot.mode == SPECTRUM_MODE_ANALYZER)
+  if ((now - spectrum_last_status_tick) >= 250UL)
   {
-    Spectrum_AnalyzerTask(now);
-  }
-  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
-  {
-    Spectrum_PllSweepTask(now);
-  }
-  else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_FIXED_AGC)
-  {
-    Spectrum_FixedTask(now);
-  }
-  else
-  {
-    Spectrum_LockDemoTask(now);
+    spectrum_last_status_tick = now;
+    Spectrum_SendStatus();
   }
 }
 
 void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, BoardComm_Status status)
 {
-  uint8_t pos = 0U;
-  uint16_t point;
-  uint16_t sample_mv;
-  uint8_t valid;
-
-  if ((status != BOARD_COMM_OK) || (cmd != BOARD_COMM_CMD_ADC_SAMPLE_RESP) || (data == 0) || (len < 7U))
-  {
-    return;
-  }
-
-  point = Spectrum_ReadU16(data, &pos);
-  sample_mv = Spectrum_ReadU16(data, &pos);
-  spectrum_adc_sample_dbm_x10 = (int16_t)Spectrum_ReadU16(data, &pos);
-  valid = data[pos++];
-  Spectrum_Debug_AdcRespCount++;
-  Spectrum_Debug_LastAdcMv = sample_mv;
-
-  if (spectrum_snapshot.mode == SPECTRUM_MODE_ANALYZER)
-  {
-    spectrum_adc_sample_point = point;
-    spectrum_adc_sample_mv = sample_mv;
-    spectrum_adc_sample_valid = valid;
-    spectrum_adc_sample_pending = 1U;
-  }
-  else
-  {
-    spectrum_snapshot.amplitude_mv = (valid != 0U) ? sample_mv : 0U;
-    AGC_Controller_ProcessSample(sample_mv, valid);
-    Spectrum_UpdateAgcSnapshot();
-  }
+  (void)cmd;
+  (void)data;
+  (void)len;
+  (void)status;
 }
 
 void SpectrumSystem_OnKey(char key)
 {
-  if (key == 'A')
-  {
-    Spectrum_UiCancelEdit();
-    SpectrumMode next = (SpectrumMode)((spectrum_snapshot.mode + 1U) % SPECTRUM_MODE_COUNT);
-    if (next == SPECTRUM_MODE_ANALYZER)
-    {
-      Spectrum_StartAnalyzer();
-    }
-    else if (next == SPECTRUM_MODE_PLL_SWEEP_AGC)
-    {
-      Spectrum_StartPllSweep();
-    }
-    else if (next == SPECTRUM_MODE_PLL_FIXED_AGC)
-    {
-      Spectrum_EnterFixedMode();
-    }
-    else
-    {
-      Spectrum_EnterLockDemoMode();
-    }
-  }
-  else if (spectrum_snapshot.ui_editing != 0U)
+  if (spectrum_snapshot.ui_editing != 0U)
   {
     if (key == 'D')
     {
-      Spectrum_UiCommitInput();
+      Spectrum_CommitInput();
     }
     else if (key == 'B')
     {
-      Spectrum_UiClearInput();
+      Spectrum_ClearInput();
     }
     else if (key == '*')
     {
-      Spectrum_UiBackspace();
+      Spectrum_Backspace();
+    }
+    else if (key == 'A')
+    {
+      Spectrum_ToggleNegativeInput();
     }
     else
     {
-      Spectrum_UiAppendInput(key);
+      Spectrum_AppendInput(key);
     }
+  }
+  else if (key == 'A')
+  {
+    Spectrum_LoadDefaults();
   }
   else if (key == 'B')
   {
-    if (spectrum_snapshot.mode == SPECTRUM_MODE_ANALYZER)
-    {
-      Spectrum_StartAnalyzer();
-    }
-    else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_SWEEP_AGC)
-    {
-      Spectrum_StartPllSweep();
-    }
-    else if (spectrum_snapshot.mode == SPECTRUM_MODE_PLL_FIXED_AGC)
-    {
-      Spectrum_EnterFixedMode();
-    }
-    else
-    {
-      Spectrum_EnterLockDemoMode();
-    }
+    spectrum_snapshot.apply_counter++;
+    spectrum_snapshot.state = SPECTRUM_HOST_READY;
   }
-  else if ((key == '4') || (key == '2'))
+  else if (key == '4')
   {
-    Spectrum_UiMoveFocus(-1);
+    Spectrum_MoveFocusHorizontal(-1);
   }
-  else if ((key == '6') || (key == '8'))
+  else if (key == '6')
   {
-    Spectrum_UiMoveFocus(1);
+    Spectrum_MoveFocusHorizontal(1);
+  }
+  else if (key == '8')
+  {
+    Spectrum_MoveFocusVertical();
+  }
+  else if (key == '2')
+  {
+    Spectrum_MoveFocusVertical();
   }
   else if (key == 'D')
   {
-    Spectrum_UiStartEdit();
+    Spectrum_StartEdit();
   }
 
-  Spectrum_UpdateAgcSnapshot();
   Spectrum_SendStatus();
 }
 
