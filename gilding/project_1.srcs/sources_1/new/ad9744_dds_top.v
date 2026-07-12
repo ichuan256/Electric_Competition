@@ -99,7 +99,7 @@ module ad9744_dds_top (
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             cfg_toggle_sync <= 3'b000;
-            ftw             <= 32'd23_860_929; // 180 MHz 采样时钟下输出 1 MHz
+            ftw             <= 32'd28_633_115; // 150 MHz 采样时钟下输出 1 MHz
             phase_offset    <= 32'd0;
             amplitude       <= 14'd8191;
             dc_offset       <= 14'sd0;
@@ -126,9 +126,11 @@ module ad9744_dds_top (
     reg signed [14:0] wave_sample;
     reg signed [29:0] product;
     reg signed [15:0] limited_pipe;
+    // 已由最小测试顶层验证通过的补码正弦直通寄存器。
+    reg [13:0] validated_sine_code;
     // 强制把 DAC 输出寄存器放入 IOB，缩短寄存器到封装管脚的延迟。
     (* IOB = "TRUE" *) reg [13:0] dac_data_r;
-    // 将32位相位偏置加法与LUT译码拆开，满足200 MHz内部时序。
+    // 将32位相位偏置加法与LUT译码拆开，满足150 MHz内部时序。
     wire [31:0] phase = phase_pipe;
     wire [7:0] sine_addr = phase[31:24];
     wire signed [14:0] sine_value = $signed({1'b0, sine_lut_256(sine_addr)}) - 15'sd8192;
@@ -141,6 +143,11 @@ module ad9744_dds_top (
     wire signed [15:0] limited_value =
         (sum_value > 16'sd8191)  ? 16'sd8191 :
         (sum_value < -16'sd8192) ? -16'sd8192 : sum_value;
+    // 默认满幅、零偏置正弦无需经过乘法/限幅链路，直接复用已经通过
+    // 板级验证的“相位 -> LUT -> 补码 -> IOB”数据通路。频率和相位控制仍有效。
+    wire validated_sine_mode = (wave_sel == 3'd0) &&
+                               (amplitude == 14'd8191) &&
+                               (dc_offset == 14'sd0);
 
     always @* begin
         case (wave_sel)
@@ -161,16 +168,21 @@ module ad9744_dds_top (
             wave_sample <= 15'sd0;
             product    <= 30'sd0;
             limited_pipe <= 16'sd0;
+            validated_sine_code <= 14'd0;
             dac_data_r <= 14'd0;
         end else begin
             phase_acc <= phase_acc + ftw;
             phase_pipe <= phase_acc + phase_offset;
+            // sine_lut_256以0x2000为零点，减0x2000转换为14位二进制补码。
+            validated_sine_code <= sine_lut_256(sine_addr) - 14'h2000;
             // 高速流水：先锁存LUT/波形结果，下一拍再送入DSP48乘法器。
             wave_sample <= wave_raw;
             product   <= wave_sample * $signed({1'b0, amplitude});
             // 将偏置/饱和限幅与IOB输出寄存器拆开，缩短高速最终输出路径。
             limited_pipe <= limited_value;
-            dac_data_r <= output_enable ? limited_pipe[13:0] : 14'd0;
+            dac_data_r <= !output_enable       ? 14'd0 :
+                          validated_sine_mode  ? validated_sine_code :
+                                                 limited_pipe[13:0];
         end
     end
 
@@ -243,8 +255,8 @@ module ad9744_clocking (
         sim_locked = 1'b0;
     end
 
-    always #2.777778 sim_clk = resetn ? ~sim_clk : 1'b0;
-    initial begin #0.277778; forever #2.777778 sim_clk_shift = resetn ? ~sim_clk_shift : 1'b0; end
+    always #3.333333 sim_clk = resetn ? ~sim_clk : 1'b0;
+    initial begin #0.333333; forever #3.333333 sim_clk_shift = resetn ? ~sim_clk_shift : 1'b0; end
     always #5 sim_clk_ch2 = resetn ? ~sim_clk_ch2 : 1'b0;
 
     initial begin
@@ -284,7 +296,7 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
         if (!rst_n) begin
             index<=0; command<=0; payload<=0; checksum<=0; tx_start<=0; tx_byte<=0;
             ack_index<=0; ack_pending<=0; activity<=0; cfg_toggle<=0;
-            ftw<=32'd23_860_929; phase_offset<=0; amplitude<=14'd8191;
+            ftw<=32'd28_633_115; phase_offset<=0; amplitude<=14'd8191;
             dc_offset<=0; duty<=16'h8000; wave_sel<=0; output_enable<=1;
             cfg2_toggle<=0; ftw2<=32'd42_949_673; phase_offset2<=0;
             amplitude2<=14'd8191; dc_offset2<=0; duty2<=16'h8000;

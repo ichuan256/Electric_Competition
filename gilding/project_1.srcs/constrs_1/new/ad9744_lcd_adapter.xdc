@@ -46,8 +46,8 @@ set_property SLEW FAST [get_ports {dac_data[*]}]
 set_property SLEW FAST [get_ports dac_clk]
 
 # AD9744 要求建立时间 tS >= 2.0 ns、保持时间 tH >= 1.5 ns。
-# 第一路数据以180 MHz/0度更新；DAC转发时钟使用180 MHz/18度，
-# 经ODDR后采样上升沿约位于数据更新后的3.06 ns，扩大建立/保持裕量。
+# 第一路数据以150 MHz/0度更新；DAC转发时钟使用150 MHz/18度，
+# 经ODDR后采样上升沿约位于数据更新后的3.67 ns，扩大建立/保持裕量。
 # 从实际 ODDR 时钟输入推导外部 DAC 采样时钟，保留 Clocking Wizard 与
 # 转发时钟的共同路径，避免错误的跨时钟域分析。
 create_generated_clock -name dac_sample_clk \

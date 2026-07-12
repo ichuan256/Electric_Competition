@@ -12,9 +12,9 @@ if {[get_property IS_LOCKED [get_ips clk_wiz_0]]} {
 set_property -dict [list \
     CONFIG.PRIM_IN_FREQ {50.000} \
     CONFIG.NUM_OUT_CLKS {3} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {180.000} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {150.000} \
     CONFIG.CLKOUT1_REQUESTED_PHASE {0.000} \
-    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {180.000} \
+    CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {150.000} \
     CONFIG.CLKOUT2_REQUESTED_PHASE {18.000} \
     CONFIG.CLKOUT3_REQUESTED_OUT_FREQ {100.000} \
     CONFIG.CLKOUT3_REQUESTED_PHASE {0.000} \
@@ -26,4 +26,4 @@ reset_target all [get_ips clk_wiz_0]
 generate_target all [get_ips clk_wiz_0]
 export_ip_user_files -of_objects [get_ips clk_wiz_0] -no_script -sync -force -quiet
 update_compile_order -fileset sources_1
-puts "clk_wiz_0 配置完成：DAC1数据180 MHz、DAC1转发时钟180 MHz/18度、DAC2 100 MHz。请按Ctrl+S保存。"
+puts "clk_wiz_0 配置完成：DAC1数据150 MHz、DAC1转发时钟150 MHz/18度、DAC2 100 MHz。请按Ctrl+S保存。"
