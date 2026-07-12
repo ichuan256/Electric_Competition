@@ -2,6 +2,7 @@
 // 本文件仅负责第二路波形生成、配置跨时钟域、补码限幅和 DAC 时钟转发。
 module ad9744_dds_ch2 (
     input  wire sample_clk,
+    input  wire dac_forward_clk,
     input  wire sample_rst_n,
     input  wire cfg_toggle_sys,
     input  wire [31:0] cfg_ftw_sys,
@@ -15,7 +16,7 @@ module ad9744_dds_ch2 (
     output wire [13:0] dac_data,
     output wire dac_sleep
 );
-    reg [2:0] cfg_toggle_sync;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] cfg_toggle_sync;
     reg [31:0] ftw;
     reg [31:0] phase_offset;
     reg [13:0] amplitude;
@@ -88,7 +89,7 @@ module ad9744_dds_ch2 (
     end
 
     ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) u_dac2_clk_oddr (
-        .Q(dac_clk), .C(sample_clk), .CE(1'b1),
+        .Q(dac_clk), .C(dac_forward_clk), .CE(1'b1),
         .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
     );
 
