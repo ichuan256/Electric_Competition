@@ -237,21 +237,10 @@ static void Spectrum_SendSumToFpga(void)
     waves[i].enable = display_state.waves[i].enable;
   }
 
-  if (display_state.wave_count <= 1U)
-  {
-    FpgaUart_SetSignal(display_state.channel_id,
-                       waves[0].frequency_hz,
-                       waves[0].phase_deg,
-                       waves[0].amplitude_code,
-                       waves[0].offset_code,
-                       waves[0].duty_code,
-                       waves[0].waveform,
-                       waves[0].enable);
-  }
-  else
-  {
-    FpgaUart_SetSum(display_state.channel_id, display_state.wave_count, waves);
-  }
+  FpgaUart_SetMultiwave(display_state.channel_id,
+                        display_state.wave_count,
+                        waves,
+                        display_state.output_bias_mv);
 }
 
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
@@ -358,7 +347,7 @@ static void Spectrum_LoadDefaults(void)
     display_state.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
     display_state.waves[i].offset_code = 0;
     display_state.waves[i].duty_code = 32768U;
-    display_state.waves[i].waveform = 0U;
+    display_state.waves[i].waveform = (i < 2U) ? 1U : 0U;
     display_state.waves[i].enable = (i < 2U) ? 1U : 0U;
   }
 }
@@ -519,6 +508,10 @@ void SpectrumDisplay_Task(void)
   {
     display_state.last_key = key;
     display_state.last_key_ascii = (uint8_t)key;
+    if ((key == 'C') && (display_state.ui_editing == 0U))
+    {
+      FpgaUart_SendTestFrame();
+    }
     display_info_refresh_requested = 1U;
   }
 

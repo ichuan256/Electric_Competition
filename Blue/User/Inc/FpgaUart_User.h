@@ -36,12 +36,16 @@ typedef struct {
 
 void FpgaUart_Init(void);
 void FpgaUart_Task(void);
+void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
+                           const FpgaUartWaveConfig *waves,
+                           int16_t offset_code);
 void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phase_deg,
                         uint16_t amplitude_code, int16_t offset_code,
                         uint16_t duty_code, uint8_t waveform,
                         uint8_t output_enable);
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
                      const FpgaUartWaveConfig *waves);
+void FpgaUart_SendTestFrame(void);
 FpgaUartState FpgaUart_GetState(void);
 
 #endif

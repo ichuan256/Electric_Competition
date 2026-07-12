@@ -1,9 +1,11 @@
 #include "SpectrumSystem_User.h"
 
+#include "AD9910_User.h"
 #include "BoardComm_User.h"
 
 static SpectrumHostSnapshot spectrum_snapshot;
 static uint32_t spectrum_last_status_tick;
+extern float dds_factor;
 
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 {
@@ -313,6 +315,43 @@ static void Spectrum_SelectWave(uint8_t wave)
   }
 }
 
+static uint32_t Spectrum_DdsAmplitudeMvpp(uint16_t amplitude_code)
+{
+  uint32_t mvpp = ((uint32_t)amplitude_code * 780UL + 4095UL) / 8191UL;
+
+  if (mvpp > 780UL)
+  {
+    mvpp = 780UL;
+  }
+
+  return mvpp;
+}
+
+static void Spectrum_UpdateDdsSine(void)
+{
+  uint8_t count = spectrum_snapshot.wave_count;
+
+  if (count > SPECTRUM_SUM_MAX_WAVES)
+  {
+    count = SPECTRUM_SUM_MAX_WAVES;
+  }
+
+  for (uint8_t i = 0U; i < count; i++)
+  {
+    SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
+
+    if ((wave->enable != 0U) && (wave->waveform == 0U))
+    {
+      dds_output_sine(wave->frequency_hz,
+                      dds_factor,
+                      Spectrum_DdsAmplitudeMvpp(wave->amplitude_code));
+      return;
+    }
+  }
+
+  dds_output_sine(1000UL, dds_factor, 0UL);
+}
+
 static void Spectrum_CommitInput(void)
 {
   uint8_t valid;
@@ -405,6 +444,7 @@ static void Spectrum_CommitInput(void)
 
   spectrum_snapshot.apply_counter++;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
+  Spectrum_UpdateDdsSine();
   Spectrum_CancelEdit();
 }
 
@@ -463,7 +503,7 @@ static void Spectrum_LoadDefaults(void)
     spectrum_snapshot.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
     spectrum_snapshot.waves[i].offset_code = 0;
     spectrum_snapshot.waves[i].duty_code = 32768U;
-    spectrum_snapshot.waves[i].waveform = 0U;
+    spectrum_snapshot.waves[i].waveform = (i < 2U) ? 1U : 0U;
     spectrum_snapshot.waves[i].enable = (i < 2U) ? 1U : 0U;
   }
 }
@@ -471,6 +511,7 @@ static void Spectrum_LoadDefaults(void)
 void SpectrumSystem_Init(void)
 {
   Spectrum_LoadDefaults();
+  Spectrum_UpdateDdsSine();
   spectrum_last_status_tick = HAL_GetTick();
   Spectrum_SendStatus();
 }
@@ -521,11 +562,13 @@ void SpectrumSystem_OnKey(char key)
   else if (key == 'A')
   {
     Spectrum_LoadDefaults();
+    Spectrum_UpdateDdsSine();
   }
   else if (key == 'B')
   {
     spectrum_snapshot.apply_counter++;
     spectrum_snapshot.state = SPECTRUM_HOST_READY;
+    Spectrum_UpdateDdsSine();
   }
   else if (key == '4')
   {
