@@ -16,8 +16,10 @@ if {[llength [get_clocks -quiet sys_clk]] == 0} {
 set_property -dict {PACKAGE_PIN U18 IOSTANDARD LVCMOS33} [get_ports sys_clk]
 set_property -dict {PACKAGE_PIN N16 IOSTANDARD LVCMOS33} [get_ports sys_rst_n]
 
-# 板载调试 LED0。
+# 板载PS_LED0：完整UART帧成功提交后闪烁。
 set_property -dict {PACKAGE_PIN H15 IOSTANDARD LVCMOS33} [get_ports led0]
+# 板载LED1：收到任意UART字节后闪烁。
+set_property -dict {PACKAGE_PIN L15 IOSTANDARD LVCMOS33} [get_ports led1]
 
 # 单片机 UART：MCU_TX -> K14（FPGA RX），MCU_RX <- M15（FPGA TX），3.3 V 电平并共地。
 set_property -dict {PACKAGE_PIN K14 IOSTANDARD LVCMOS33} [get_ports mcu_uart_rxd]
@@ -58,3 +60,8 @@ create_generated_clock -name dac_sample_clk \
 set_output_delay -clock dac_sample_clk -max 2.0 [get_ports {dac_data[*]}]
 set_output_delay -clock dac_sample_clk -min -1.5 [get_ports {dac_data[*]}]
 set_false_path -from [get_ports mcu_uart_rxd]
+
+# 多波形配置采用稳定数据总线加翻转握手跨时钟域。只切断活动配置
+# 寄存器D端路径；mix_toggle_sync仍由ASYNC_REG同步链处理。
+set_false_path -to [get_pins -hierarchical -regexp \
+    {.*(mix_type|mix_ftw|mix_phase|mix_amp|mix_duty|mix_offset)_reg.*\/D}]
