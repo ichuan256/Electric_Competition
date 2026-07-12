@@ -364,7 +364,24 @@ For predictable output, update active recipe only on `SUM_END`, preferably synch
 
 ## 9. MCU UI Notes
 
-The MCU should expose a separate multi-waveform configuration mode. Suggested flow:
+The MCU should expose one configuration UI that selects the protocol by waveform count.
+
+When `wave_count == 1`, the MCU must use the original single-waveform commands only:
+
+```text
+01/81 frequency
+02/82 phase
+03/83 amplitude
+04/84 offset
+05/85 duty
+06/86 waveform
+07/87 output enable
+```
+
+No `SUM_BEGIN`, `SUM_WAVE_BEGIN`, `SUM_COMMIT`, or `SUM_END` frame is sent for a single waveform.
+For backward compatibility with simple FPGA receivers, the MCU may send these seven legacy frames as a timed command group without blocking on ACK between frames. If ACK frames are returned, the MCU still records and displays them for status/debugging.
+
+When `wave_count > 1`, the MCU uses the multi-waveform transaction flow:
 
 1. User enters multi-waveform mode.
 2. MCU sends `SUM_BEGIN` with channel and wave count.
@@ -375,7 +392,7 @@ The MCU should expose a separate multi-waveform configuration mode. Suggested fl
 
 If the user cancels editing, MCU sends `SUM_ABORT`.
 
-The existing single-waveform FPGA control panel may continue to use `01..07`. Multi-waveform mode should use only `20..2F` during a transaction.
+Multi-waveform transaction mode should use only `20..2F` during a transaction. The FPGA should start staging multiple waveforms only after the `SUM_BEGIN` frame and should atomically apply the staged sum only after `SUM_END`.
 
 ## 10. Backward Compatibility
 
@@ -387,8 +404,9 @@ The existing single-waveform FPGA control panel may continue to use `01..07`. Mu
 ## 11. Recommended Test Order
 
 1. Verify old single-waveform commands still work.
-2. Send `SUM_BEGIN` with one waveform, then one complete slot, `SUM_COMMIT`, `SUM_END`; output should match the same single-waveform result.
-3. Send two low-amplitude sine waves at different frequencies; verify output shows both components.
-4. Send incomplete waveform and confirm `SUM_COMMIT` returns `STATUS=06`.
-5. Send an unsafe amplitude recipe and confirm either `STATUS=07` or saturated output, depending on flags.
-6. Send `SUM_ABORT` halfway through a transaction and confirm previous output remains unchanged.
+2. Set UI `wave_count=1` and confirm the MCU sends only `01..07` or `81..87`, with no `20..2F` frames.
+3. Set UI `wave_count=2` and confirm the MCU sends `SUM_BEGIN`, both waveform slots, `SUM_COMMIT`, then `SUM_END`.
+4. Send two low-amplitude sine waves at different frequencies; verify output shows both components.
+5. Send incomplete waveform and confirm `SUM_COMMIT` returns `STATUS=06`.
+6. Send an unsafe amplitude recipe and confirm either `STATUS=07` or saturated output, depending on flags.
+7. Send `SUM_ABORT` halfway through a transaction and confirm previous output remains unchanged.

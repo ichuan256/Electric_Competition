@@ -237,7 +237,21 @@ static void Spectrum_SendSumToFpga(void)
     waves[i].enable = display_state.waves[i].enable;
   }
 
-  FpgaUart_SetSum(display_state.channel_id, display_state.wave_count, waves);
+  if (display_state.wave_count <= 1U)
+  {
+    FpgaUart_SetSignal(display_state.channel_id,
+                       waves[0].frequency_hz,
+                       waves[0].phase_deg,
+                       waves[0].amplitude_code,
+                       waves[0].offset_code,
+                       waves[0].duty_code,
+                       waves[0].waveform,
+                       waves[0].enable);
+  }
+  else
+  {
+    FpgaUart_SetSum(display_state.channel_id, display_state.wave_count, waves);
+  }
 }
 
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)

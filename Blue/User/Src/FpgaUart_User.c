@@ -49,6 +49,7 @@ static uint8_t fpga_uart_queue_index;
 static uint8_t fpga_uart_waiting_ack;
 static uint8_t fpga_uart_retry_count;
 static uint8_t fpga_uart_pending_cmd;
+static uint8_t fpga_uart_require_ack;
 static uint32_t fpga_uart_last_ack_wait_tick;
 
 static uint8_t FpgaUart_Checksum(const uint8_t *data, uint8_t len)
@@ -169,6 +170,7 @@ static void FpgaUart_ClearQueue(void)
   fpga_uart_waiting_ack = 0U;
   fpga_uart_retry_count = 0U;
   fpga_uart_pending_cmd = 0U;
+  fpga_uart_require_ack = 1U;
   fpga_uart_state.queue_count = 0U;
   fpga_uart_state.queue_index = 0U;
   fpga_uart_state.waiting_ack = 0U;
@@ -207,6 +209,11 @@ static uint32_t FpgaUart_WaveBeginData(uint8_t channel_id, uint8_t wave_index, u
   data |= (uint32_t)(channel_id & 0x01U) << 8;
   data |= (uint32_t)(enable != 0U) << 16;
   return data;
+}
+
+static uint8_t FpgaUart_ChannelCommand(uint8_t channel_id, uint8_t base_cmd)
+{
+  return ((channel_id & 0x01U) != 0U) ? (uint8_t)(base_cmd | 0x80U) : base_cmd;
 }
 
 void FpgaUart_Init(void)
@@ -289,9 +296,19 @@ void FpgaUart_Task(void)
       fpga_uart_state.last_cmd = command->cmd;
       fpga_uart_state.last_data = command->data;
       fpga_uart_pending_cmd = command->cmd;
-      fpga_uart_waiting_ack = 1U;
-      fpga_uart_state.waiting_ack = 1U;
-      fpga_uart_last_ack_wait_tick = now;
+      if (fpga_uart_require_ack != 0U)
+      {
+        fpga_uart_waiting_ack = 1U;
+        fpga_uart_state.waiting_ack = 1U;
+        fpga_uart_last_ack_wait_tick = now;
+      }
+      else
+      {
+        fpga_uart_queue_index++;
+        fpga_uart_retry_count = 0U;
+        fpga_uart_state.waiting_ack = 0U;
+        fpga_uart_state.retry_count = 0U;
+      }
     }
     else
     {
@@ -313,19 +330,27 @@ void FpgaUart_Task(void)
   fpga_uart_state.queue_index = fpga_uart_queue_index;
 }
 
-void FpgaUart_SetSignal(uint32_t frequency_hz, uint16_t phase_deg,
+void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phase_deg,
                         uint16_t amplitude_code, int16_t offset_code,
                         uint16_t duty_code, uint8_t waveform,
                         uint8_t output_enable)
 {
   FpgaUart_ClearQueue();
-  FpgaUart_QueueCommand(FPGA_UART_CMD_FREQ, FpgaUart_FrequencyToFtw(frequency_hz));
-  FpgaUart_QueueCommand(FPGA_UART_CMD_PHASE, FpgaUart_PhaseToWord(phase_deg));
-  FpgaUart_QueueCommand(FPGA_UART_CMD_AMPLITUDE, amplitude_code);
-  FpgaUart_QueueCommand(FPGA_UART_CMD_OFFSET, (uint16_t)offset_code);
-  FpgaUart_QueueCommand(FPGA_UART_CMD_DUTY, duty_code);
-  FpgaUart_QueueCommand(FPGA_UART_CMD_WAVEFORM, waveform);
-  FpgaUart_QueueCommand(FPGA_UART_CMD_OUTPUT, output_enable);
+  fpga_uart_require_ack = 0U;
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_FREQ),
+                        FpgaUart_FrequencyToFtw(frequency_hz));
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_PHASE),
+                        FpgaUart_PhaseToWord(phase_deg));
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_AMPLITUDE),
+                        amplitude_code);
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_OFFSET),
+                        (uint16_t)offset_code);
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_DUTY),
+                        duty_code);
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_WAVEFORM),
+                        waveform);
+  FpgaUart_QueueCommand(FpgaUart_ChannelCommand(channel_id, FPGA_UART_CMD_OUTPUT),
+                        output_enable);
 }
 
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
@@ -345,6 +370,7 @@ void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
   }
 
   FpgaUart_ClearQueue();
+  fpga_uart_require_ack = 1U;
   FpgaUart_QueueCommand(FPGA_UART_CMD_SUM_BEGIN, FpgaUart_BeginData(channel_id, wave_count));
 
   for (uint8_t i = 0U; i < wave_count; i++)
