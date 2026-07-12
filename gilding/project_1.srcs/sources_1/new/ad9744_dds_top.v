@@ -50,6 +50,8 @@ module ad9744_dds_top (
     wire [55:0] mix_amp_sys;
     wire [63:0] mix_duty_sys;
     wire signed [13:0] mix_offset_sys;
+    wire mix_cache_mode_sys;
+    wire [12:0] mix_cache_points_sys;
 
     uart_multiwave_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_mix_uart (
         .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(mcu_uart_rxd),
@@ -57,7 +59,8 @@ module ad9744_dds_top (
         .cfg_toggle(mix_cfg_toggle_sys), .type_flat(mix_type_sys),
         .ftw_flat(mix_ftw_sys), .phase_flat(mix_phase_sys),
         .amp_flat(mix_amp_sys), .duty_flat(mix_duty_sys),
-        .dc_offset(mix_offset_sys)
+        .dc_offset(mix_offset_sys), .cache_mode(mix_cache_mode_sys),
+        .cache_points(mix_cache_points_sys)
     );
 
     // DAC2暂时维持旧默认输出，不接收新协议；后续TARGET=1接入独立槽位。
@@ -98,9 +101,13 @@ module ad9744_dds_top (
     reg [55:0] mix_amp;
     reg [63:0] mix_duty;
     reg signed [13:0] mix_offset;
+    reg mix_cache_mode;
+    reg [12:0] mix_cache_points;
+    reg mix_restart;
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             mix_toggle_sync <= 3'b000;
+            mix_restart <= 1'b0;
             // 上电诊断默认值：槽位0输出1 MHz满幅三角波，其余槽位关闭。
             mix_type <= 8'h02;
             mix_ftw <= {96'd0,32'd42_949_673};
@@ -108,12 +115,19 @@ module ad9744_dds_top (
             mix_amp <= {42'd0,14'd8191};
             mix_duty <= {4{16'h8000}};
             mix_offset <= 14'sd0;
+            mix_cache_mode <= 1'b0;
+            mix_cache_points <= 13'd0;
         end else begin
             mix_toggle_sync <= {mix_toggle_sync[1:0],mix_cfg_toggle_sys};
+            mix_restart <= 1'b0;
             if (mix_toggle_sync[2] != mix_toggle_sync[1]) begin
                 mix_type <= mix_type_sys; mix_ftw <= mix_ftw_sys;
                 mix_phase <= mix_phase_sys; mix_amp <= mix_amp_sys;
                 mix_duty <= mix_duty_sys; mix_offset <= mix_offset_sys;
+                mix_cache_mode <= mix_cache_mode_sys;
+                mix_cache_points <= mix_cache_points_sys;
+                // 新配置提交后四个槽位从共同零相位同步启动。
+                mix_restart <= 1'b1;
             end
         end
     end
@@ -121,9 +135,20 @@ module ad9744_dds_top (
     wire [13:0] mixed_dac_data;
     ad9744_multiwave_mixer u_multiwave_mixer (
         .clk(sample_clk), .rst_n(sample_rst_n),
+        .restart(mix_restart),
         .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
         .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
         .dac_data(mixed_dac_data)
+    );
+
+    wire [13:0] cached_dac_data;
+    wire cache_active;
+    ad9744_period_cache u_period_cache (
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix_restart),
+        .enable_request(mix_cache_mode), .period_points(mix_cache_points),
+        .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
+        .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
+        .cache_active(cache_active), .dac_data(cached_dac_data)
     );
 
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。
@@ -207,8 +232,14 @@ module ad9744_dds_top (
         .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
     );
 
+    // 模式选择后再经过统一IOB寄存器，避免BRAM/DDS选择多路器直接落到管脚。
+    (* IOB = "TRUE" *) reg [13:0] dac_output_r;
+    always @(posedge sample_clk or negedge sample_rst_n) begin
+        if (!sample_rst_n) dac_output_r <= 14'd0;
+        else               dac_output_r <= cache_active ? cached_dac_data : mixed_dac_data;
+    end
     assign dac_clk   = forwarded_clk;
-    assign dac_data  = mixed_dac_data;
+    assign dac_data  = dac_output_r;
     assign dac_sleep = 1'b0;
     // LED0/LED1均为低电平点亮，下面由诊断状态机驱动。
 

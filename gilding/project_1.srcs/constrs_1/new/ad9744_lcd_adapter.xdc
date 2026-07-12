@@ -9,10 +9,6 @@
 #   D2, D1, D4, D3, ..., D14, D13, PD/SLEEP, CLK.
 #   +5V 和 GND 仅由硬件连接，不出现在 Verilog/XDC 端口中。
 
-if {[llength [get_clocks -quiet sys_clk]] == 0} {
-    create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
-}
-
 set_property -dict {PACKAGE_PIN U18 IOSTANDARD LVCMOS33} [get_ports sys_clk]
 set_property -dict {PACKAGE_PIN N16 IOSTANDARD LVCMOS33} [get_ports sys_rst_n]
 
@@ -56,7 +52,7 @@ set_property SLEW FAST [get_ports dac_clk]
 # 从实际 ODDR 时钟输入推导外部 DAC 采样时钟，保留 Clocking Wizard 与
 # 转发时钟的共同路径，避免错误的跨时钟域分析。
 create_generated_clock -name dac_sample_clk \
-    -source [get_pins u_dac_clk_oddr/C] -invert [get_ports dac_clk]
+    -source [get_pins u_dac_clk_oddr/C] -divide_by 1 -invert [get_ports dac_clk]
 set_output_delay -clock dac_sample_clk -max 2.0 [get_ports {dac_data[*]}]
 set_output_delay -clock dac_sample_clk -min -1.5 [get_ports {dac_data[*]}]
 set_false_path -from [get_ports mcu_uart_rxd]
@@ -64,4 +60,4 @@ set_false_path -from [get_ports mcu_uart_rxd]
 # 多波形配置采用稳定数据总线加翻转握手跨时钟域。只切断活动配置
 # 寄存器D端路径；mix_toggle_sync仍由ASYNC_REG同步链处理。
 set_false_path -to [get_pins -hierarchical -regexp \
-    {.*(mix_type|mix_ftw|mix_phase|mix_amp|mix_duty|mix_offset)_reg.*\/D}]
+    {.*(mix_type|mix_ftw|mix_phase|mix_amp|mix_duty|mix_offset|mix_cache_mode|mix_cache_points)_reg.*\/D}]
