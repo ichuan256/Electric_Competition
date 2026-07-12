@@ -16,16 +16,11 @@ module ad9744_dds_top (
     output wire        led0
 );
     wire sample_clk;
-    wire dac1_forward_clk;
-    wire sample_clk_ch2;
     wire clk_locked;
     wire sample_rst_n;
-    wire sample_rst_n_ch2;
 
     ad9744_clocking u_clocking (
         .clk_out1(sample_clk),
-        .clk_out2(dac1_forward_clk),
-        .clk_out3(sample_clk_ch2),
         .resetn(sys_rst_n),
         .locked(clk_locked),
         .clk_in1(sys_clk)
@@ -64,8 +59,7 @@ module ad9744_dds_top (
 
     // 第二路 DAC 使用独立源文件，便于单独维护和后续接入电压转电流模块。
     ad9744_dds_ch2 u_dac2 (
-        .sample_clk(sample_clk_ch2), .dac_forward_clk(sample_clk_ch2),
-        .sample_rst_n(sample_rst_n_ch2),
+        .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
         .cfg_toggle_sys(cfg2_toggle_sys), .cfg_ftw_sys(cfg2_ftw_sys),
         .cfg_phase_sys(cfg2_phase_sys), .cfg_amplitude_sys(cfg2_amplitude_sys),
         .cfg_offset_sys(cfg2_offset_sys), .cfg_duty_sys(cfg2_duty_sys),
@@ -80,15 +74,8 @@ module ad9744_dds_top (
     end
     assign sample_rst_n = reset_sync[1];
 
-    reg [1:0] reset_sync_ch2;
-    always @(posedge sample_clk_ch2 or negedge sys_rst_n) begin
-        if (!sys_rst_n) reset_sync_ch2 <= 2'b00;
-        else            reset_sync_ch2 <= {reset_sync_ch2[0], clk_locked};
-    end
-    assign sample_rst_n_ch2 = reset_sync_ch2[1];
-
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。
-    (* ASYNC_REG = "TRUE" *) reg [2:0] cfg_toggle_sync;
+    reg [2:0] cfg_toggle_sync;
     reg [31:0] ftw;
     reg [31:0] phase_offset;
     reg [13:0] amplitude;
@@ -99,7 +86,7 @@ module ad9744_dds_top (
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             cfg_toggle_sync <= 3'b000;
-            ftw             <= 32'd28_633_115; // 150 MHz 采样时钟下输出 1 MHz
+            ftw             <= 32'd42_949_673; // 100 MHz 采样时钟下输出 1 MHz
             phase_offset    <= 32'd0;
             amplitude       <= 14'd8191;
             dc_offset       <= 14'sd0;
@@ -121,17 +108,11 @@ module ad9744_dds_top (
     end
 
     reg [31:0] phase_acc;
-    reg [31:0] phase_pipe;
     reg signed [14:0] wave_raw;
-    reg signed [14:0] wave_sample;
     reg signed [29:0] product;
-    reg signed [15:0] limited_pipe;
-    // 已由最小测试顶层验证通过的补码正弦直通寄存器。
-    reg [13:0] validated_sine_code;
     // 强制把 DAC 输出寄存器放入 IOB，缩短寄存器到封装管脚的延迟。
     (* IOB = "TRUE" *) reg [13:0] dac_data_r;
-    // 将32位相位偏置加法与LUT译码拆开，满足150 MHz内部时序。
-    wire [31:0] phase = phase_pipe;
+    wire [31:0] phase = phase_acc + phase_offset;
     wire [7:0] sine_addr = phase[31:24];
     wire signed [14:0] sine_value = $signed({1'b0, sine_lut_256(sine_addr)}) - 15'sd8192;
     wire signed [14:0] saw_value = $signed({1'b0, phase[31:18]}) - 15'sd8192;
@@ -143,11 +124,6 @@ module ad9744_dds_top (
     wire signed [15:0] limited_value =
         (sum_value > 16'sd8191)  ? 16'sd8191 :
         (sum_value < -16'sd8192) ? -16'sd8192 : sum_value;
-    // 默认满幅、零偏置正弦无需经过乘法/限幅链路，直接复用已经通过
-    // 板级验证的“相位 -> LUT -> 补码 -> IOB”数据通路。频率和相位控制仍有效。
-    wire validated_sine_mode = (wave_sel == 3'd0) &&
-                               (amplitude == 14'd8191) &&
-                               (dc_offset == 14'sd0);
 
     always @* begin
         case (wave_sel)
@@ -164,31 +140,18 @@ module ad9744_dds_top (
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             phase_acc  <= 32'd0;
-            phase_pipe <= 32'd0;
-            wave_sample <= 15'sd0;
             product    <= 30'sd0;
-            limited_pipe <= 16'sd0;
-            validated_sine_code <= 14'd0;
             dac_data_r <= 14'd0;
         end else begin
             phase_acc <= phase_acc + ftw;
-            phase_pipe <= phase_acc + phase_offset;
-            // sine_lut_256以0x2000为零点，减0x2000转换为14位二进制补码。
-            validated_sine_code <= sine_lut_256(sine_addr) - 14'h2000;
-            // 高速流水：先锁存LUT/波形结果，下一拍再送入DSP48乘法器。
-            wave_sample <= wave_raw;
-            product   <= wave_sample * $signed({1'b0, amplitude});
-            // 将偏置/饱和限幅与IOB输出寄存器拆开，缩短高速最终输出路径。
-            limited_pipe <= limited_value;
-            dac_data_r <= !output_enable       ? 14'd0 :
-                          validated_sine_mode  ? validated_sine_code :
-                                                 limited_pipe[13:0];
+            product   <= wave_raw * $signed({1'b0, amplitude});
+            dac_data_r <= output_enable ? limited_value[13:0] : 14'd0;
         end
     end
 
     wire forwarded_clk;
     ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) u_dac_clk_oddr (
-        .Q(forwarded_clk), .C(dac1_forward_clk), .CE(1'b1),
+        .Q(forwarded_clk), .C(sample_clk), .CE(1'b1),
         .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
     );
 
@@ -229,35 +192,25 @@ module ad9744_clocking (
     input  wire clk_in1,
     input  wire resetn,
     output wire clk_out1,
-    output wire clk_out2,
-    output wire clk_out3,
     output wire locked
 );
 `ifdef SYNTHESIS
     clk_wiz_0 u_clk_wiz (
         .clk_out1(clk_out1),
-        .clk_out2(clk_out2),
-        .clk_out3(clk_out3),
         .reset(~resetn),
         .locked(locked),
         .clk_in1(clk_in1)
     );
 `else
     reg sim_clk;
-    reg sim_clk_shift;
-    reg sim_clk_ch2;
     reg sim_locked;
 
     initial begin
         sim_clk    = 1'b0;
-        sim_clk_shift = 1'b0;
-        sim_clk_ch2 = 1'b0;
         sim_locked = 1'b0;
     end
 
-    always #3.333333 sim_clk = resetn ? ~sim_clk : 1'b0;
-    initial begin #0.333333; forever #3.333333 sim_clk_shift = resetn ? ~sim_clk_shift : 1'b0; end
-    always #5 sim_clk_ch2 = resetn ? ~sim_clk_ch2 : 1'b0;
+    always #5 sim_clk = resetn ? ~sim_clk : 1'b0;
 
     initial begin
         wait (resetn === 1'b1);
@@ -268,8 +221,6 @@ module ad9744_clocking (
     end
 
     assign clk_out1 = sim_clk;
-    assign clk_out2 = sim_clk_shift;
-    assign clk_out3 = sim_clk_ch2;
     assign locked   = sim_locked;
 `endif
 endmodule
@@ -296,7 +247,7 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
         if (!rst_n) begin
             index<=0; command<=0; payload<=0; checksum<=0; tx_start<=0; tx_byte<=0;
             ack_index<=0; ack_pending<=0; activity<=0; cfg_toggle<=0;
-            ftw<=32'd28_633_115; phase_offset<=0; amplitude<=14'd8191;
+            ftw<=32'd42_949_673; phase_offset<=0; amplitude<=14'd8191;
             dc_offset<=0; duty<=16'h8000; wave_sel<=0; output_enable<=1;
             cfg2_toggle<=0; ftw2<=32'd42_949_673; phase_offset2<=0;
             amplitude2<=14'd8191; dc_offset2<=0; duty2<=16'h8000;
