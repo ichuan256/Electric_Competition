@@ -110,7 +110,7 @@ static void Spectrum_Backspace(void)
 
 static void Spectrum_ToggleNegativeInput(void)
 {
-  if (spectrum_snapshot.ui_focus != 10U)
+  if ((spectrum_snapshot.ui_focus != 4U) && (spectrum_snapshot.ui_focus != 10U))
   {
     return;
   }
@@ -243,12 +243,45 @@ static uint32_t Spectrum_ParseFrequencyHz(uint32_t value_x1000, uint8_t has_deci
   {
     frequency_hz = 1UL;
   }
-  else if (frequency_hz > 10000000UL)
-  {
-    frequency_hz = 10000000UL;
-  }
 
   return frequency_hz;
+}
+
+static uint32_t Spectrum_MaxFrequencyHz(uint8_t waveform)
+{
+  return (waveform == 0U) ? 20000000UL : 4000000UL;
+}
+
+static void Spectrum_ClampWaveFrequency(SpectrumWaveConfig *wave)
+{
+  uint32_t max_hz;
+
+  if (wave == 0)
+  {
+    return;
+  }
+
+  max_hz = Spectrum_MaxFrequencyHz(wave->waveform);
+  if (wave->frequency_hz < 1UL)
+  {
+    wave->frequency_hz = 1UL;
+  }
+  else if (wave->frequency_hz > max_hz)
+  {
+    wave->frequency_hz = max_hz;
+  }
+}
+
+static uint16_t Spectrum_NormalizePhaseDeg(int32_t phase_deg)
+{
+  int32_t normalized = phase_deg % 360;
+
+  if (normalized < 0)
+  {
+    normalized += 360;
+  }
+
+  return (uint16_t)normalized;
 }
 
 static void Spectrum_MoveFocusHorizontal(int8_t step)
@@ -362,7 +395,9 @@ static void Spectrum_CommitInput(void)
   int32_t signed_value;
   SpectrumWaveConfig *wave = &spectrum_snapshot.waves[spectrum_snapshot.selected_wave];
 
-  if ((valid == 0U) && (spectrum_snapshot.ui_focus != 10U))
+  if ((valid == 0U) &&
+      (spectrum_snapshot.ui_focus != 4U) &&
+      (spectrum_snapshot.ui_focus != 10U))
   {
     Spectrum_CancelEdit();
     return;
@@ -388,9 +423,19 @@ static void Spectrum_CommitInput(void)
       break;
     case 3U:
       wave->frequency_hz = Spectrum_ParseFrequencyHz(value_x1000, has_decimal);
+      Spectrum_ClampWaveFrequency(wave);
       break;
     case 4U:
-      wave->phase_deg = (uint16_t)(value % 360UL);
+      signed_value_x1000 = Spectrum_ParseSignedInputX1000(&valid, &has_decimal);
+      if (valid == 0U)
+      {
+        Spectrum_CancelEdit();
+        return;
+      }
+      signed_value = (signed_value_x1000 >= 0) ?
+                     ((signed_value_x1000 + 500) / 1000) :
+                     ((signed_value_x1000 - 500) / 1000);
+      wave->phase_deg = Spectrum_NormalizePhaseDeg(signed_value);
       break;
     case 5U:
       if (value > 8191UL) { value = 8191UL; }
@@ -414,6 +459,7 @@ static void Spectrum_CommitInput(void)
     case 8U:
       if (value > 3UL) { value = 3UL; }
       wave->waveform = (uint8_t)value;
+      Spectrum_ClampWaveFrequency(wave);
       break;
     case 9U:
       wave->enable = (value != 0UL) ? 1U : 0U;
