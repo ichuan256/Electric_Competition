@@ -2,7 +2,6 @@
 #define _FPGA_UART_USER_H_
 
 #include "stm32h7xx_hal.h"
-#include "FftUart_User.h"
 
 #define FPGA_UART_SUM_MAX_WAVES 4U
 
@@ -51,7 +50,6 @@ void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phas
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
                      const FpgaUartWaveConfig *waves);
 void FpgaUart_SendTestFrame(void);
-void FpgaUart_SendFftMeasureRequest(const FftUartMeasureRequest *request);
 FpgaUartState FpgaUart_GetState(void);
 
 #endif

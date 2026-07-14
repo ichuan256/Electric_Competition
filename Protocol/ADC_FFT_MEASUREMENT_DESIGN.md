@@ -102,6 +102,17 @@ CRC    = CRC-16/CCITT-FALSE, little-endian on wire
 UART   = 115200 8N1, 3.3V, common ground
 ```
 
+当前工程复用原有板间串口，不新增或更换引脚：
+
+```text
+Black USART3_TX PB10  -> Blue USART1_RX PA10
+Black USART3_RX PB11  <- Blue USART1_TX PA9
+Black GND             --- Blue GND
+```
+
+普通测量默认优先使用 `Fs = 2 MHz`。现有 LCR 测试模式保持 `1 MHz` DDS 激励不变，
+为了避开 `Fs/2` 奈奎斯特边界，该测试请求固定使用 `Fs = 4 MHz`。
+
 命令分配：
 
 | CMD | 方向 | 名称 | 说明 |
@@ -202,7 +213,14 @@ bit6 amplitude_saturated
 bit7 low_snr
 bit8 used_hann_window
 bit9 used_rectangular_window
+bit10 timer_triggered_dma_capture
+bit11 adc_dma_error
 ```
+
+Blue 当前实现使用独立 PLL3R 为 ADC 提供 48 MHz 内核时钟，ADC1 保持 16 位、2.5 周期采样时间。
+TIM6 由 240 MHz APB1 定时器时钟分频，生成精确的 1/2/4 MHz TRGO；DMA1 Stream1
+以 normal 模式一次搬运 4096 个 halfword。原始缓冲由链接器放在 AXI SRAM，并按
+32 字节对齐；DMA 完成后先停止 TIM6，再做 D-Cache invalidate，随后才进入主频幅度计算。
 
 ### 4.5 MEASURE_ERROR 0xE1
 

@@ -30,9 +30,16 @@ typedef struct {
   uint32_t crc_error_count;
   uint32_t len_error_count;
   uint32_t busy_count;
+  uint32_t pending_count;
+  uint16_t last_rx_size;
+  uint8_t rx_debug_buf[64];
+  uint8_t rx_debug_pos;
+  uint32_t rx_debug_count;
   AdcFftMeasurementRequest last_request;
   AdcFftMeasurementResult last_result;
 } AdcFftProtocolState;
+
+extern AdcFftProtocolState adc_fft_protocol_state;
 
 void AdcFftProtocol_Init(UART_HandleTypeDef *huart);
 uint8_t AdcFftProtocol_IsFrameStart(const uint8_t *data, uint16_t size);

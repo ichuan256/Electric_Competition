@@ -1,4 +1,5 @@
 #include "BoardComm_User.h"
+#include "AdcFftClient_User.h"
 
 /*
  * 本模块当前使用的 UART 句柄。
@@ -178,8 +179,15 @@ void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
     return;
   }
 
-  status = BoardComm_ParseFrame(board_comm_rx_buf, size, &cmd, &data, &len);
-  BoardComm_RxFrameCallback(cmd, data, len, status);
+  if (AdcFftClient_IsFrameStart(board_comm_rx_buf, size) != 0U)
+  {
+    (void)AdcFftClient_HandleRxBuffer(board_comm_rx_buf, size);
+  }
+  else
+  {
+    status = BoardComm_ParseFrame(board_comm_rx_buf, size, &cmd, &data, &len);
+    BoardComm_RxFrameCallback(cmd, data, len, status);
+  }
 
   /*
    * ReceiveToIdle 每触发一次事件，本轮接收就结束。
@@ -316,6 +324,19 @@ BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, ui
  * 发送 PING 命令。
  * 当前约定 0x01 表示 PING，用来检查板间串口是否连通。
  */
+BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout)
+{
+  if ((board_comm_uart == 0) || (frame == 0) || (len == 0U))
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if (HAL_UART_Transmit(board_comm_uart, (uint8_t *)frame, len, timeout) != HAL_OK)
+  {
+    return BOARD_COMM_TIMEOUT;
+  }
+  return BOARD_COMM_OK;
+}
+
 BoardComm_Status BoardComm_Ping(void)
 {
   return BoardComm_Send(0x01, 0, 0);

@@ -1,4 +1,5 @@
 #include "BoardComm_User.h"
+#include "AdcFftProtocol_User.h"
 #include "LogDetector_User.h"
 
 static UART_HandleTypeDef *board_comm_uart = &huart1;
@@ -219,6 +220,13 @@ void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
 
   board_comm_last_rx_size = size;
 
+  if (AdcFftProtocol_IsFrameStart(board_comm_rx_buf, size) != 0U)
+  {
+    (void)AdcFftProtocol_HandleRxBuffer(board_comm_rx_buf, size);
+    (void)BoardComm_StartReceiveToIdleIT();
+    return;
+  }
+
   while (offset < size)
   {
     cmd = 0;
@@ -382,6 +390,19 @@ BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
     return BOARD_COMM_TIMEOUT;
   }
 
+  return BOARD_COMM_OK;
+}
+
+BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout)
+{
+  if ((board_comm_uart == 0) || (frame == 0) || (len == 0U))
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if (HAL_UART_Transmit(board_comm_uart, (uint8_t *)frame, len, timeout) != HAL_OK)
+  {
+    return BOARD_COMM_TIMEOUT;
+  }
   return BOARD_COMM_OK;
 }
 

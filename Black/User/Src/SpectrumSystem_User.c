@@ -1,6 +1,7 @@
 #include "SpectrumSystem_User.h"
 
 #include "AD9910_User.h"
+#include "AdcFftClient_User.h"
 #include "BoardComm_User.h"
 
 static SpectrumHostSnapshot spectrum_snapshot;
@@ -392,6 +393,13 @@ static void Spectrum_SetLcrTestSignal(void)
                   Spectrum_DdsAmplitudeMvpp(SPECTRUM_LCR_TEST_AMP_CODE));
 }
 
+static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
+{
+  const uint64_t dds_clock_hz = 1000000000ULL;
+  return (uint32_t)((((uint64_t)frequency_hz << 32) + (dds_clock_hz / 2ULL)) /
+                    dds_clock_hz);
+}
+
 static void Spectrum_CommitInput(void)
 {
   uint8_t valid;
@@ -572,6 +580,8 @@ void SpectrumSystem_Init(void)
 void SpectrumSystem_Task(void)
 {
   uint32_t now = HAL_GetTick();
+
+  AdcFftClient_Task();
   if ((now - spectrum_last_status_tick) >= 250UL)
   {
     spectrum_last_status_tick = now;
@@ -634,6 +644,9 @@ void SpectrumSystem_OnKey(char key)
   else if ((spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST) && (key == 'D'))
   {
     Spectrum_SetLcrTestSignal();
+    (void)AdcFftClient_RequestMeasurement(SPECTRUM_LCR_TEST_FREQ_HZ,
+                                          Spectrum_LcrDdsFtw(SPECTRUM_LCR_TEST_FREQ_HZ),
+                                          1000UL);
     spectrum_snapshot.apply_counter++;
     spectrum_snapshot.state = SPECTRUM_HOST_SENT;
   }

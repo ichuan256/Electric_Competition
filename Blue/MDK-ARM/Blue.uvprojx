@@ -461,9 +461,14 @@
               <FilePath>../User/Src/FpgaUart_User.c</FilePath>
             </File>
             <File>
-              <FileName>FftUart_User.c</FileName>
+              <FileName>AdcFftMeasure_User.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../User/Src/FftUart_User.c</FilePath>
+              <FilePath>../User/Src/AdcFftMeasure_User.c</FilePath>
+            </File>
+            <File>
+              <FileName>AdcFftProtocol_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/AdcFftProtocol_User.c</FilePath>
             </File>
             <File>
               <FileName>mpu.c</FileName>

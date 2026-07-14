@@ -136,6 +136,9 @@ void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, Bo
  */
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len);
 
+/* Send an already encoded frame on the Black-Blue UART. */
+BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout);
+
 /*
  * ����ʽ����һ֡���ݡ�
  * �ýӿ���Ҫ��������ڵ���ʹ�ã���ʽ���������Ƽ�ʹ�ÿ����жϷ�ʽ��

@@ -17,7 +17,8 @@
 #define ADC_FFT_STATUS_LOW_SNR                  0x0080U
 #define ADC_FFT_STATUS_USED_HANN_WINDOW         0x0100U
 #define ADC_FFT_STATUS_USED_RECT_WINDOW         0x0200U
-#define ADC_FFT_STATUS_SOFTWARE_CAPTURE         0x0400U
+#define ADC_FFT_STATUS_TIMER_TRIGGERED_DMA_CAPTURE 0x0400U
+#define ADC_FFT_STATUS_ADC_DMA_ERROR            0x0800U
 
 typedef enum {
   ADC_FFT_WINDOW_AUTO = 0,
@@ -43,7 +44,9 @@ typedef struct {
   uint32_t reference_frequency_hz;
   uint32_t dds_ftw;
   uint32_t sample_rate_hz;
+  uint16_t fft_length;
   uint16_t target_bin;
+  uint32_t settle_us;
   uint16_t pre_capture_delay_us;
   uint8_t window_mode;
   uint8_t flags;
@@ -75,6 +78,9 @@ typedef struct {
   AdcFftMeasurementRequest active_request;
   AdcFftMeasurementResult last_result;
 } AdcFftMeasureSnapshot;
+
+extern AdcFftMeasureSnapshot adc_fft_measure_state;
+extern uint16_t adc_fft_raw[ADC_FFT_SAMPLE_COUNT];
 
 void AdcFftMeasure_Init(void);
 uint8_t AdcFftMeasure_IsSupportedSampleRate(uint32_t sample_rate_hz);

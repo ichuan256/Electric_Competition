@@ -637,6 +637,11 @@
               <FilePath>..\User\Src\BoardComm_User.c</FilePath>
             </File>
             <File>
+              <FileName>AdcFftClient_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\User\Src\AdcFftClient_User.c</FilePath>
+            </File>
+            <File>
               <FileName>Keypad_User.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\User\Src\Keypad_User.c</FilePath>
