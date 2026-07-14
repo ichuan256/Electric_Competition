@@ -5,6 +5,7 @@
 module ad9744_dds_top (
     input  wire        sys_clk,
     input  wire        sys_rst_n,
+    input  wire        key1_n,
     input  wire        mcu_uart_rxd,
     output wire        mcu_uart_txd,
     output wire        dac_clk,
@@ -13,7 +14,8 @@ module ad9744_dds_top (
     output wire        dac2_clk,
     output wire [13:0] dac2_data,
     output wire        dac2_sleep,
-    output wire        led0
+    output wire        led0,
+    output wire        led1
 );
     wire sample_clk;
     wire clk_locked;
@@ -43,10 +45,30 @@ module ad9744_dds_top (
     wire [2:0]  cfg2_wave_sys;
     wire        cfg2_enable_sys;
     wire        uart_activity;
+    wire mix_cfg_toggle_sys;
+    wire [7:0] mix_type_sys;
+    wire [127:0] mix_ftw_sys, mix_phase_sys;
+    wire [55:0] mix_amp_sys;
+    wire [63:0] mix_duty_sys;
+    wire signed [13:0] mix_offset_sys;
+    wire mix_cache_mode_sys;
+    wire [12:0] mix_cache_points_sys;
 
-    uart_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_uart_config (
+    uart_multiwave_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_mix_uart (
         .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(mcu_uart_rxd),
         .uart_tx(mcu_uart_txd), .activity(uart_activity),
+        .cfg_toggle(mix_cfg_toggle_sys), .type_flat(mix_type_sys),
+        .ftw_flat(mix_ftw_sys), .phase_flat(mix_phase_sys),
+        .amp_flat(mix_amp_sys), .duty_flat(mix_duty_sys),
+        .dc_offset(mix_offset_sys), .cache_mode(mix_cache_mode_sys),
+        .cache_points(mix_cache_points_sys)
+    );
+
+    // DAC2暂时维持旧默认输出，不接收新协议；后续TARGET=1接入独立槽位。
+    wire legacy_uart_unused, legacy_activity_unused;
+    uart_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_legacy_defaults (
+        .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(1'b1),
+        .uart_tx(legacy_uart_unused), .activity(legacy_activity_unused),
         .cfg_toggle(cfg_toggle_sys), .ftw(cfg_ftw_sys),
         .phase_offset(cfg_phase_sys), .amplitude(cfg_amplitude_sys),
         .dc_offset(cfg_offset_sys), .duty(cfg_duty_sys),
@@ -60,6 +82,7 @@ module ad9744_dds_top (
     // 第二路 DAC 使用独立源文件，便于单独维护和后续接入电压转电流模块。
     ad9744_dds_ch2 u_dac2 (
         .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
+        .key1_n(key1_n),
         .cfg_toggle_sys(cfg2_toggle_sys), .cfg_ftw_sys(cfg2_ftw_sys),
         .cfg_phase_sys(cfg2_phase_sys), .cfg_amplitude_sys(cfg2_amplitude_sys),
         .cfg_offset_sys(cfg2_offset_sys), .cfg_duty_sys(cfg2_duty_sys),
@@ -73,6 +96,62 @@ module ad9744_dds_top (
         else            reset_sync <= {reset_sync[0], clk_locked};
     end
     assign sample_rst_n = reset_sync[1];
+
+    (* ASYNC_REG = "TRUE" *) reg [2:0] mix_toggle_sync;
+    reg [7:0] mix_type;
+    reg [127:0] mix_ftw, mix_phase;
+    reg [55:0] mix_amp;
+    reg [63:0] mix_duty;
+    reg signed [13:0] mix_offset;
+    reg mix_cache_mode;
+    reg [12:0] mix_cache_points;
+    reg mix_restart;
+    always @(posedge sample_clk or negedge sample_rst_n) begin
+        if (!sample_rst_n) begin
+            mix_toggle_sync <= 3'b000;
+            mix_restart <= 1'b0;
+            // 上电诊断默认值：槽位0输出1 MHz满幅三角波，其余槽位关闭。
+            mix_type <= 8'h02;
+            mix_ftw <= {96'd0,32'd42_949_673};
+            mix_phase <= 128'd0;
+            mix_amp <= {42'd0,14'd8191};
+            mix_duty <= {4{16'h8000}};
+            mix_offset <= 14'sd0;
+            mix_cache_mode <= 1'b0;
+            mix_cache_points <= 13'd0;
+        end else begin
+            mix_toggle_sync <= {mix_toggle_sync[1:0],mix_cfg_toggle_sys};
+            mix_restart <= 1'b0;
+            if (mix_toggle_sync[2] != mix_toggle_sync[1]) begin
+                mix_type <= mix_type_sys; mix_ftw <= mix_ftw_sys;
+                mix_phase <= mix_phase_sys; mix_amp <= mix_amp_sys;
+                mix_duty <= mix_duty_sys; mix_offset <= mix_offset_sys;
+                mix_cache_mode <= mix_cache_mode_sys;
+                mix_cache_points <= mix_cache_points_sys;
+                // 新配置提交后四个槽位从共同零相位同步启动。
+                mix_restart <= 1'b1;
+            end
+        end
+    end
+
+    wire [13:0] mixed_dac_data;
+    ad9744_multiwave_mixer u_multiwave_mixer (
+        .clk(sample_clk), .rst_n(sample_rst_n),
+        .restart(mix_restart),
+        .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
+        .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
+        .dac_data(mixed_dac_data)
+    );
+
+    wire [13:0] cached_dac_data;
+    wire cache_active;
+    ad9744_period_cache u_period_cache (
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix_restart),
+        .enable_request(mix_cache_mode), .period_points(mix_cache_points),
+        .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
+        .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
+        .cache_active(cache_active), .dac_data(cached_dac_data)
+    );
 
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。
     reg [2:0] cfg_toggle_sync;
@@ -155,10 +234,75 @@ module ad9744_dds_top (
         .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
     );
 
+    // 模式选择后再经过统一IOB寄存器，避免BRAM/DDS选择多路器直接落到管脚。
+    (* IOB = "TRUE" *) reg [13:0] dac_output_r;
+    always @(posedge sample_clk or negedge sample_rst_n) begin
+        if (!sample_rst_n) dac_output_r <= 14'd0;
+        else               dac_output_r <= cache_active ? cached_dac_data : mixed_dac_data;
+    end
     assign dac_clk   = forwarded_clk;
-    assign dac_data  = dac_data_r;
+    assign dac_data  = dac_output_r;
     assign dac_sleep = 1'b0;
-    assign led0      = clk_locked ^ uart_activity;
+    // LED0/LED1均为低电平点亮，下面由诊断状态机驱动。
+
+    // UART物理接收诊断：收到任意一个完整UART字节后，LED1永久以1 Hz闪烁。
+    // 此指示不要求帧头、长度、异或校验或帧尾正确，可用于定位问题是在
+    // 串口物理层之前，还是在新协议解析阶段。
+    // 当前行为：仅完整配置帧成功提交后，LED1锁存为亮。
+    reg uart_activity_d;
+    reg mix_cfg_toggle_d;
+    reg uart_seen;
+    reg frame_ok_seen;
+    reg [23:0] led1_divider;
+    reg [24:0] led0_divider;
+    reg led1_r;
+    reg led0_r;
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            uart_activity_d <= 1'b0;
+            mix_cfg_toggle_d <= 1'b0;
+            uart_seen <= 1'b0;
+            frame_ok_seen <= 1'b0;
+            led1_divider <= 24'd0;
+            led0_divider <= 25'd0;
+            led1_r <= 1'b1;
+            led0_r <= 1'b1;
+        end else begin
+            uart_activity_d <= uart_activity;
+            mix_cfg_toggle_d <= mix_cfg_toggle_sys;
+
+            // 任意一个UART字节被接收器识别后，LED1开始持续闪烁。
+            if (uart_activity != uart_activity_d)
+                uart_seen <= 1'b1;
+            // 完整帧成功校验并提交（已处理结束帧）后，LED0开始持续闪烁。
+            if (mix_cfg_toggle_sys != mix_cfg_toggle_d)
+                frame_ok_seen <= 1'b1;
+
+            // LED1约2 Hz闪烁：每0.25秒翻转一次。
+            if (!uart_seen) begin
+                led1_divider <= 24'd0;
+                led1_r <= 1'b1;
+            end else if (led1_divider == 24'd12_499_999) begin
+                led1_divider <= 24'd0;
+                led1_r <= ~led1_r;
+            end else begin
+                led1_divider <= led1_divider + 1'b1;
+            end
+
+            // PS_LED0约1 Hz闪烁：每0.5秒翻转一次。
+            if (!frame_ok_seen) begin
+                led0_divider <= 25'd0;
+                led0_r <= 1'b1;
+            end else if (led0_divider == 25'd24_999_999) begin
+                led0_divider <= 25'd0;
+                led0_r <= ~led0_r;
+            end else begin
+                led0_divider <= led0_divider + 1'b1;
+            end
+        end
+    end
+    assign led0 = led0_r;
+    assign led1 = led1_r;
 
     function [13:0] sine_lut_256;
         input [7:0] addr;
@@ -249,9 +393,10 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
             ack_index<=0; ack_pending<=0; activity<=0; cfg_toggle<=0;
             ftw<=32'd42_949_673; phase_offset<=0; amplitude<=14'd8191;
             dc_offset<=0; duty<=16'h8000; wave_sel<=0; output_enable<=1;
-            cfg2_toggle<=0; ftw2<=32'd42_949_673; phase_offset2<=0;
-            amplitude2<=14'd8191; dc_offset2<=0; duty2<=16'h8000;
-            wave_sel2<=0; output_enable2<=1;
+            // DAC2上电默认4 MHz方波；与ad9744_dds_ch2内部复位值保持一致。
+            cfg2_toggle<=0; ftw2<=32'd171_798_692; phase_offset2<=0;
+            amplitude2<=14'd4096; dc_offset2<=0; duty2<=16'h8000;
+            wave_sel2<=3'd1; output_enable2<=1;
         end else begin
             tx_start <= 0;
             if (rx_valid) begin
