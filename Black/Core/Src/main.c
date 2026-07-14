@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "AD9910_User.h"
 #include "ADF4351_User.h"
+#include "AdcFftClient_User.h"
 #include "BoardComm_User.h"
 #include "Keypad_User.h"
 #include "SpectrumSystem_User.h"
@@ -113,6 +114,7 @@ int main(void)
   //ADF4351_SetFreq(2000);
 	Delay_Init();
   BoardComm_Init();
+  AdcFftClient_Init();
   (void)BoardComm_StartReceiveToIdleIT();
   Keypad_Init();
 	AD9910_Init_1();

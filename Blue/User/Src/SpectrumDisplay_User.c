@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "BoardComm_User.h"
+#include "AdcFftProtocol_User.h"
 #include "FpgaUart_User.h"
 #include "lcd.h"
 #include "led.h"
@@ -20,6 +21,11 @@
 #define DISPLAY_TABLE_ROW_H       24U
 #define DISPLAY_TABLE_ROWS        5U
 #define DISPLAY_INFO_Y            284U
+#define DISPLAY_LCR_FREQ_HZ       1000000UL
+#define DISPLAY_LCR_DDS_CLK_HZ    1000000000ULL
+#define DISPLAY_LCR_ADC_FS_HZ     2500000UL
+#define DISPLAY_LCR_FFT_LEN       4096UL
+#define DISPLAY_LCR_SETTLE_US     1000UL
 
 static SpectrumDisplayState display_state;
 static uint32_t display_last_rx_count = 0UL;
@@ -32,6 +38,18 @@ static uint8_t display_last_apply_counter = 0xFFU;
 static uint8_t display_last_fpga_queue_index = 0xFFU;
 static uint8_t display_last_fpga_queue_count = 0xFFU;
 static uint8_t display_last_fpga_dirty = 0xFFU;
+static uint32_t display_last_fpga_tx_count = 0xFFFFFFFFUL;
+static uint32_t display_last_fpga_rx_count = 0xFFFFFFFFUL;
+static uint32_t display_last_fpga_error_count = 0xFFFFFFFFUL;
+static uint8_t display_last_fpga_ack_cmd = 0xFFU;
+static uint8_t display_last_fpga_ack_status = 0xFFU;
+static uint32_t display_last_fft_rx_count = 0xFFFFFFFFUL;
+static uint32_t display_last_fft_error_count = 0xFFFFFFFFUL;
+static uint8_t display_last_fft_has_result = 0xFFU;
+static uint8_t display_last_fft_seq = 0xFFU;
+static uint32_t display_lcr_last_ftw = 0UL;
+static uint64_t display_lcr_last_frequency_mHz = 0ULL;
+static uint16_t display_lcr_last_bin = 0U;
 
 static uint16_t Spectrum_ReadU16(const uint8_t *buf, uint8_t *pos)
 {
@@ -54,6 +72,32 @@ static uint32_t Spectrum_ReadU32(const uint8_t *buf, uint8_t *pos)
 static int16_t Spectrum_ReadI16(const uint8_t *buf, uint8_t *pos)
 {
   return (int16_t)Spectrum_ReadU16(buf, pos);
+}
+
+static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
+{
+  uint64_t scaled = ((uint64_t)frequency_hz << 32) + (DISPLAY_LCR_DDS_CLK_HZ / 2ULL);
+  return (uint32_t)(scaled / DISPLAY_LCR_DDS_CLK_HZ);
+}
+
+static uint64_t Spectrum_LcrFrequencyMilliHz(uint32_t ftw)
+{
+  uint64_t scaled = ((uint64_t)ftw * DISPLAY_LCR_DDS_CLK_HZ * 1000ULL) + (1ULL << 31);
+  return scaled >> 32;
+}
+
+static uint16_t Spectrum_LcrTargetBin(uint64_t frequency_mHz)
+{
+  uint64_t numerator = (frequency_mHz * DISPLAY_LCR_FFT_LEN) +
+                       (((uint64_t)DISPLAY_LCR_ADC_FS_HZ * 1000ULL) / 2ULL);
+  uint64_t bin = numerator / ((uint64_t)DISPLAY_LCR_ADC_FS_HZ * 1000ULL);
+
+  if (bin > 2048ULL)
+  {
+    bin = 2048ULL;
+  }
+
+  return (uint16_t)bin;
 }
 
 static const char *Spectrum_StateText(uint8_t state)
@@ -232,7 +276,10 @@ static void Spectrum_SendSumToFpga(void)
     waves[i].enable = display_state.waves[i].enable;
   }
 
-  FpgaUart_SetSum(display_state.channel_id, display_state.wave_count, waves);
+  FpgaUart_SetMultiwave(display_state.channel_id,
+                        display_state.wave_count,
+                        waves,
+                        display_state.output_bias_mv);
 }
 
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
@@ -308,8 +355,16 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
 
   if (display_state.apply_counter != display_last_apply_counter)
   {
+    uint8_t previous_apply_counter = display_last_apply_counter;
     display_last_apply_counter = display_state.apply_counter;
-    Spectrum_SendSumToFpga();
+    if (display_state.mode == SPECTRUM_DISPLAY_MODE_LCR_TEST)
+    {
+      (void)previous_apply_counter;
+    }
+    else
+    {
+      Spectrum_SendSumToFpga();
+    }
   }
 
   changed = (memcmp(&previous_state, &display_state, sizeof(display_state)) != 0) ? 1U : 0U;
@@ -331,6 +386,9 @@ static void Spectrum_LoadDefaults(void)
   display_state.output_bias_mv = 0;
   display_state.last_key = '-';
   display_state.last_key_ascii = 0U;
+  display_lcr_last_ftw = Spectrum_LcrDdsFtw(DISPLAY_LCR_FREQ_HZ);
+  display_lcr_last_frequency_mHz = Spectrum_LcrFrequencyMilliHz(display_lcr_last_ftw);
+  display_lcr_last_bin = Spectrum_LcrTargetBin(display_lcr_last_frequency_mHz);
 
   for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
   {
@@ -339,7 +397,7 @@ static void Spectrum_LoadDefaults(void)
     display_state.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
     display_state.waves[i].offset_code = 0;
     display_state.waves[i].duty_code = 32768U;
-    display_state.waves[i].waveform = 0U;
+    display_state.waves[i].waveform = (i < 2U) ? 1U : 0U;
     display_state.waves[i].enable = (i < 2U) ? 1U : 0U;
   }
 }
@@ -454,7 +512,7 @@ static void Spectrum_DrawInfo(void)
            display_last_rx_size);
   lcd_show_string(8U, DISPLAY_INFO_Y, 464U, 16U, 16U, line, BLACK);
 
-  snprintf(line, sizeof(line), "FPGA CMD:%02X ACK:%02X/%u TX:%lu RX:%lu ERR:%lu Q:%u/%u",
+  snprintf(line, sizeof(line), "FPGA CMD:%02X ACK:%02X/%u TX:%lu RX:%lu ERR:%lu Q:%u/%u W:%u R:%u",
            fpga.last_cmd,
            fpga.last_ack_cmd,
            fpga.last_ack_status,
@@ -462,12 +520,92 @@ static void Spectrum_DrawInfo(void)
            (unsigned long)fpga.rx_count,
            (unsigned long)fpga.error_count,
            fpga.queue_index,
-           fpga.queue_count);
+           fpga.queue_count,
+           fpga.waiting_ack,
+           fpga.retry_count);
+  lcd_show_string(8U, 304U, 464U, 16U, 16U, line, BLACK);
+}
+
+static void Spectrum_DrawLcrPage(void)
+{
+  char line[64];
+  AdcFftProtocolState adc_fft = AdcFftProtocol_GetState();
+  AdcFftMeasurementResult result = adc_fft.last_result;
+
+  lcd_fill(0U, 0U, 479U, 319U, WHITE);
+  lcd_show_string(8U, 8U, 360U, 24U, 24U, "LCR ADC FFT TEST", RED);
+  lcd_show_string(8U, 34U, 460U, 16U, 16U,
+                  "B back   D measure   DDS: 1MHz sine, no DC offset",
+                  GRAY);
+
+  lcd_draw_rectangle(8U, 58U, 471U, 146U, BLACK);
+  lcd_fill(9U, 59U, 470U, 80U, LGRAY);
+  lcd_show_string(16U, 62U, 430U, 16U, 16U, "REQUEST", BLACK);
+  snprintf(line, sizeof(line), "FREQ: 1.000000MHz   BIN:%u   SETTLE:%luus",
+           display_lcr_last_bin,
+           (unsigned long)DISPLAY_LCR_SETTLE_US);
+  lcd_show_string(16U, 88U, 440U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "FTW: 0x%08lX   ACT:%lu.%06luMHz",
+           (unsigned long)display_lcr_last_ftw,
+           (unsigned long)(display_lcr_last_frequency_mHz / 1000000000ULL),
+           (unsigned long)((display_lcr_last_frequency_mHz / 1000ULL) % 1000000ULL));
+  lcd_show_string(16U, 112U, 440U, 16U, 16U, line, BLACK);
+
+  lcd_draw_rectangle(8U, 158U, 471U, 278U, BLACK);
+  lcd_fill(9U, 159U, 470U, 180U, LGRAY);
+  lcd_show_string(16U, 162U, 430U, 16U, 16U, "SINE FIT RESULT", BLACK);
+  snprintf(line, sizeof(line), "SEQ:%u SW:%u PT:%u BIN:%u/%u STAT:0x%04X",
+           adc_fft.last_seq,
+           result.sweep_id,
+           result.point_id,
+           result.main_bin,
+           result.target_bin,
+           result.status);
+  lcd_show_string(16U, 188U, 440U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "RMS:%lu.%03lumV",
+           (unsigned long)(result.voltage_uv_rms / 1000UL),
+           (unsigned long)(result.voltage_uv_rms % 1000UL));
+  lcd_show_string(16U, 212U, 220U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "PEAK:%lu.%03lumV",
+           (unsigned long)(result.voltage_uv_peak / 1000UL),
+           (unsigned long)(result.voltage_uv_peak % 1000UL));
+  lcd_show_string(240U, 212U, 220U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "F:%luHz FS:%luHz ADC:%u..%u",
+           (unsigned long)result.main_frequency_hz,
+           (unsigned long)result.sample_rate_hz,
+           result.adc_min_code,
+           result.adc_max_code);
+  lcd_show_string(16U, 236U, 440U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "MIN:%ldmV MAX:%ldmV VPP:%lumV",
+           (long)(result.voltage_uv_min / 1000L),
+           (long)(result.voltage_uv_max / 1000L),
+           (unsigned long)(result.voltage_uv_pp / 1000UL));
+  lcd_show_string(16U, 260U, 440U, 16U, 16U, line, BLACK);
+
+  snprintf(line, sizeof(line), "ADC FIT CMD:%02X TX:%lu RX:%lu ERR:%lu BUSY:%lu STATE:%u",
+           adc_fft.last_cmd,
+           (unsigned long)adc_fft.tx_count,
+           (unsigned long)adc_fft.rx_count,
+           (unsigned long)adc_fft.error_count,
+           (unsigned long)adc_fft.busy_count,
+           (unsigned int)AdcFftMeasure_GetState());
+  lcd_show_string(8U, 284U, 464U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "KEY:%c  BOARD RX:%lu ERR:%lu  UART ERR:%lu",
+           display_state.last_key,
+           (unsigned long)display_state.rx_count,
+           (unsigned long)display_state.error_count,
+           (unsigned long)adc_fft.crc_error_count);
   lcd_show_string(8U, 304U, 464U, 16U, 16U, line, BLACK);
 }
 
 static void Spectrum_DrawScreen(void)
 {
+  if (display_state.mode == SPECTRUM_DISPLAY_MODE_LCR_TEST)
+  {
+    Spectrum_DrawLcrPage();
+    return;
+  }
+
   lcd_fill(0U, 0U, 479U, 51U, WHITE);
   lcd_show_string(8U, 8U, 340U, 24U, 24U, "SUM WAVEFORM", RED);
   lcd_show_string(8U, 34U, 460U, 16U, 16U,
@@ -498,6 +636,10 @@ void SpectrumDisplay_Task(void)
   {
     display_state.last_key = key;
     display_state.last_key_ascii = (uint8_t)key;
+    if ((key == 'C') && (display_state.ui_editing == 0U))
+    {
+      FpgaUart_SendTestFrame();
+    }
     display_info_refresh_requested = 1U;
   }
 
@@ -523,12 +665,38 @@ void SpectrumDisplay_Task(void)
   fpga_state = FpgaUart_GetState();
   if ((fpga_state.queue_index != display_last_fpga_queue_index) ||
       (fpga_state.queue_count != display_last_fpga_queue_count) ||
-      (fpga_state.dirty_mask != display_last_fpga_dirty))
+      (fpga_state.dirty_mask != display_last_fpga_dirty) ||
+      (fpga_state.tx_count != display_last_fpga_tx_count) ||
+      (fpga_state.rx_count != display_last_fpga_rx_count) ||
+      (fpga_state.error_count != display_last_fpga_error_count) ||
+      (fpga_state.last_ack_cmd != display_last_fpga_ack_cmd) ||
+      (fpga_state.last_ack_status != display_last_fpga_ack_status))
   {
     display_last_fpga_queue_index = fpga_state.queue_index;
     display_last_fpga_queue_count = fpga_state.queue_count;
     display_last_fpga_dirty = fpga_state.dirty_mask;
+    display_last_fpga_tx_count = fpga_state.tx_count;
+    display_last_fpga_rx_count = fpga_state.rx_count;
+    display_last_fpga_error_count = fpga_state.error_count;
+    display_last_fpga_ack_cmd = fpga_state.last_ack_cmd;
+    display_last_fpga_ack_status = fpga_state.last_ack_status;
     display_info_refresh_requested = 1U;
+  }
+
+  {
+    AdcFftProtocolState fft_state = AdcFftProtocol_GetState();
+    uint8_t has_result = (fft_state.last_result.status != 0U) ? 1U : 0U;
+    if ((fft_state.rx_count != display_last_fft_rx_count) ||
+        (fft_state.error_count != display_last_fft_error_count) ||
+        (has_result != display_last_fft_has_result) ||
+        (fft_state.last_seq != display_last_fft_seq))
+    {
+      display_last_fft_rx_count = fft_state.rx_count;
+      display_last_fft_error_count = fft_state.error_count;
+      display_last_fft_has_result = has_result;
+      display_last_fft_seq = fft_state.last_seq;
+      display_info_refresh_requested = 1U;
+    }
   }
 
   if ((display_force_refresh != 0U) || (display_refresh_requested != 0U))
@@ -543,7 +711,14 @@ void SpectrumDisplay_Task(void)
   {
     display_last_refresh_tick = now;
     display_info_refresh_requested = 0U;
-    Spectrum_DrawInfo();
+    if (display_state.mode == SPECTRUM_DISPLAY_MODE_LCR_TEST)
+    {
+      Spectrum_DrawLcrPage();
+    }
+    else
+    {
+      Spectrum_DrawInfo();
+    }
   }
 }
 
