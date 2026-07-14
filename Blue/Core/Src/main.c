@@ -178,9 +178,9 @@ int main(void)
   mpu_memory_protection();
   lcd_init();
   (void)AGC_DAC_Init();
+  AdcFftMeasure_Init();
   LogDetector_Init();
   BoardComm_Init();
-  AdcFftMeasure_Init();
   AdcFftProtocol_Init(&huart1);
   (void)BoardComm_StartReceiveToIdleIT();
   FpgaUart_Init();
