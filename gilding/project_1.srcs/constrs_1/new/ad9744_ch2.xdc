@@ -1,4 +1,8 @@
 # 第二路 AD9744 独立引脚约束。映射已经按用户确认修正：U7 为 D6，V7 为 D5。
+set_property -dict {PACKAGE_PIN K16 IOSTANDARD LVCMOS33} [get_ports key1_n] ;# 板载KEY1，低电平按下
+set_property PULLUP true [get_ports key1_n]
+set_false_path -from [get_ports key1_n]
+
 set_property -dict {PACKAGE_PIN Y6  IOSTANDARD LVCMOS33} [get_ports dac2_sleep] ;# PD/SLEEP
 set_property -dict {PACKAGE_PIN Y7  IOSTANDARD LVCMOS33} [get_ports dac2_clk]   ;# CLK
 set_property -dict {PACKAGE_PIN V6  IOSTANDARD LVCMOS33} [get_ports {dac2_data[13]}] ;# D14

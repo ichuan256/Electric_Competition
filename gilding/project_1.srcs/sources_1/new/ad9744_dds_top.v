@@ -5,6 +5,7 @@
 module ad9744_dds_top (
     input  wire        sys_clk,
     input  wire        sys_rst_n,
+    input  wire        key1_n,
     input  wire        mcu_uart_rxd,
     output wire        mcu_uart_txd,
     output wire        dac_clk,
@@ -81,6 +82,7 @@ module ad9744_dds_top (
     // 第二路 DAC 使用独立源文件，便于单独维护和后续接入电压转电流模块。
     ad9744_dds_ch2 u_dac2 (
         .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
+        .key1_n(key1_n),
         .cfg_toggle_sys(cfg2_toggle_sys), .cfg_ftw_sys(cfg2_ftw_sys),
         .cfg_phase_sys(cfg2_phase_sys), .cfg_amplitude_sys(cfg2_amplitude_sys),
         .cfg_offset_sys(cfg2_offset_sys), .cfg_duty_sys(cfg2_duty_sys),
@@ -391,9 +393,10 @@ module uart_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
             ack_index<=0; ack_pending<=0; activity<=0; cfg_toggle<=0;
             ftw<=32'd42_949_673; phase_offset<=0; amplitude<=14'd8191;
             dc_offset<=0; duty<=16'h8000; wave_sel<=0; output_enable<=1;
-            cfg2_toggle<=0; ftw2<=32'd42_949_673; phase_offset2<=0;
-            amplitude2<=14'd8191; dc_offset2<=0; duty2<=16'h8000;
-            wave_sel2<=0; output_enable2<=1;
+            // DAC2上电默认4 MHz方波；与ad9744_dds_ch2内部复位值保持一致。
+            cfg2_toggle<=0; ftw2<=32'd171_798_692; phase_offset2<=0;
+            amplitude2<=14'd4096; dc_offset2<=0; duty2<=16'h8000;
+            wave_sel2<=3'd1; output_enable2<=1;
         end else begin
             tx_start <= 0;
             if (rx_valid) begin

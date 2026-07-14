@@ -3,6 +3,7 @@
 module ad9744_dds_ch2 (
     input  wire sample_clk,
     input  wire sample_rst_n,
+    input  wire key1_n,
     input  wire cfg_toggle_sys,
     input  wire [31:0] cfg_ftw_sys,
     input  wire [31:0] cfg_phase_sys,
@@ -23,16 +24,21 @@ module ad9744_dds_ch2 (
     reg [15:0] duty;
     reg [2:0] wave_sel;
     reg output_enable;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] key1_sync;
+    reg key1_stable;
+    reg [20:0] key1_debounce_count;
+    reg key1_press;
 
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             cfg_toggle_sync <= 3'b000;
-            ftw <= 32'd42_949_673;
+            // 100 MHz采样时钟：round(2^32 * 4 MHz / 100 MHz) = 171798692。
+            ftw <= 32'd171_798_692;
             phase_offset <= 32'd0;
-            amplitude <= 14'd8191;
+            amplitude <= 14'd4096;
             dc_offset <= 14'sd0;
             duty <= 16'h8000;
-            wave_sel <= 3'd0;
+            wave_sel <= 3'd1;
             output_enable <= 1'b1;
         end else begin
             cfg_toggle_sync <= {cfg_toggle_sync[1:0], cfg_toggle_sys};
@@ -44,6 +50,35 @@ module ad9744_dds_ch2 (
                 duty <= cfg_duty_sys;
                 wave_sel <= cfg_wave_sys;
                 output_enable <= cfg_enable_sys;
+            end else if (key1_press) begin
+                case (wave_sel)
+                    3'd1: wave_sel <= 3'd2;
+                    3'd2: wave_sel <= 3'd3;
+                    default: wave_sel <= 3'd1;
+                endcase
+            end
+        end
+    end
+
+    // 板载KEY1低电平按下。双触发器同步后进行约20 ms消抖；仅在确认按下
+    // 的瞬间切换一次，顺序为方波(1) -> 三角波(2) -> 锯齿波(3)。
+    always @(posedge sample_clk or negedge sample_rst_n) begin
+        if (!sample_rst_n) begin
+            key1_sync <= 2'b11;
+            key1_stable <= 1'b1;
+            key1_debounce_count <= 21'd0;
+            key1_press <= 1'b0;
+        end else begin
+            key1_sync <= {key1_sync[0], key1_n};
+            key1_press <= 1'b0;
+            if (key1_sync[1] == key1_stable) begin
+                key1_debounce_count <= 21'd0;
+            end else if (key1_debounce_count == 21'd1_999_999) begin
+                key1_debounce_count <= 21'd0;
+                key1_stable <= key1_sync[1];
+                if (!key1_sync[1]) key1_press <= 1'b1;
+            end else begin
+                key1_debounce_count <= key1_debounce_count + 1'b1;
             end
         end
     end
@@ -59,6 +94,10 @@ module ad9744_dds_ch2 (
     wire signed [15:0] tri_up = -16'sd8192 + $signed({1'b0, phase[30:18], 1'b0});
     wire signed [15:0] tri_value = phase[31] ? -tri_up - 16'sd1 : tri_up;
     wire signed [14:0] square_value = (phase[31:16] < duty) ? 15'sd8191 : -15'sd8192;
+    // 4 MHz测试方波固定50%占空比并直接给出1/2满量程的14位补码，绕过
+    // DSP乘法、缩放和限幅链。+4096=0x1000，-4096=0x3000；两个码之间
+    // 只翻转符号位，可显著降低并行总线同步开关噪声。
+    wire [13:0] square_dac_code = phase[31] ? 14'h3000 : 14'h1000;
     wire signed [15:0] scaled_value = product >>> 13;
     wire signed [15:0] sum_value = scaled_value + dc_offset;
     wire signed [15:0] limited_value =
@@ -81,9 +120,15 @@ module ad9744_dds_ch2 (
             product <= 30'sd0;
             dac_data_r <= 14'd0;
         end else begin
-            phase_acc <= phase_acc + ftw;
+            if (key1_press) phase_acc <= 32'd0;
+            else            phase_acc <= phase_acc + ftw;
             product <= wave_raw * $signed({1'b0, amplitude});
-            dac_data_r <= output_enable ? limited_value[13:0] : 14'd0;
+            if (!output_enable)
+                dac_data_r <= 14'd0;
+            else if (wave_sel == 3'd1)
+                dac_data_r <= square_dac_code;
+            else
+                dac_data_r <= limited_value[13:0];
         end
     end
 
