@@ -23,7 +23,7 @@
 #define DISPLAY_INFO_Y            284U
 #define DISPLAY_LCR_FREQ_HZ       1000000UL
 #define DISPLAY_LCR_DDS_CLK_HZ    1000000000ULL
-#define DISPLAY_LCR_ADC_FS_HZ     4000000UL
+#define DISPLAY_LCR_ADC_FS_HZ     2500000UL
 #define DISPLAY_LCR_FFT_LEN       4096UL
 #define DISPLAY_LCR_SETTLE_US     1000UL
 
@@ -551,9 +551,9 @@ static void Spectrum_DrawLcrPage(void)
            (unsigned long)((display_lcr_last_frequency_mHz / 1000ULL) % 1000000ULL));
   lcd_show_string(16U, 112U, 440U, 16U, 16U, line, BLACK);
 
-  lcd_draw_rectangle(8U, 158U, 471U, 258U, BLACK);
+  lcd_draw_rectangle(8U, 158U, 471U, 278U, BLACK);
   lcd_fill(9U, 159U, 470U, 180U, LGRAY);
-  lcd_show_string(16U, 162U, 430U, 16U, 16U, "FFT RESULT", BLACK);
+  lcd_show_string(16U, 162U, 430U, 16U, 16U, "SINE FIT RESULT", BLACK);
   snprintf(line, sizeof(line), "SEQ:%u SW:%u PT:%u BIN:%u/%u STAT:0x%04X",
            adc_fft.last_seq,
            result.sweep_id,
@@ -576,8 +576,13 @@ static void Spectrum_DrawLcrPage(void)
            result.adc_min_code,
            result.adc_max_code);
   lcd_show_string(16U, 236U, 440U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "MIN:%ldmV MAX:%ldmV VPP:%lumV",
+           (long)(result.voltage_uv_min / 1000L),
+           (long)(result.voltage_uv_max / 1000L),
+           (unsigned long)(result.voltage_uv_pp / 1000UL));
+  lcd_show_string(16U, 260U, 440U, 16U, 16U, line, BLACK);
 
-  snprintf(line, sizeof(line), "ADC FFT CMD:%02X TX:%lu RX:%lu ERR:%lu BUSY:%lu STATE:%u",
+  snprintf(line, sizeof(line), "ADC FIT CMD:%02X TX:%lu RX:%lu ERR:%lu BUSY:%lu STATE:%u",
            adc_fft.last_cmd,
            (unsigned long)adc_fft.tx_count,
            (unsigned long)adc_fft.rx_count,

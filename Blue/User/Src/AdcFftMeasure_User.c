@@ -8,16 +8,14 @@
 #define ADC_FFT_FULL_SCALE_CODE      65535UL
 #define ADC_FFT_OVERRANGE_LOW        64U
 #define ADC_FFT_OVERRANGE_HIGH       65471U
-#define ADC_FFT_SEARCH_HALF_WIDTH    2U
-#define ADC_FFT_TWO_PI               6.2831853071795864769f
-#define ADC_FFT_SQRT2                1.4142135623730950488f
+#define ADC_FFT_TWO_PI               6.2831853071795864769
+#define ADC_FFT_SQRT2                1.4142135623730950488
 #define ADC_FFT_CAPTURE_TIMEOUT_MS   20UL
+#define ADC_FFT_FIT_PIVOT_MIN        1.0e-9
 
 AdcFftMeasureSnapshot adc_fft_measure_state;
 __ALIGNED(32) uint16_t adc_fft_raw[ADC_FFT_SAMPLE_COUNT];
 
-static float adc_fft_real[ADC_FFT_SAMPLE_COUNT];
-static float adc_fft_imag[ADC_FFT_SAMPLE_COUNT];
 static DMA_HandleTypeDef adc_fft_dma;
 static TIM_HandleTypeDef adc_fft_timer;
 static ADC_InitTypeDef adc_fft_saved_init;
@@ -29,10 +27,14 @@ static uint32_t adc_fft_state_tick;
 static uint8_t AdcFft_ConfigureAdcClock(void)
 {
   RCC_PeriphCLKInitTypeDef peripheral_clock = {0};
+  uint32_t adc_source_hz;
 
   peripheral_clock.PeriphClockSelection = RCC_PERIPHCLK_ADC;
   peripheral_clock.PLL3.PLL3M = 2U;
-  peripheral_clock.PLL3.PLL3N = 96U;
+  adc_fft_measure_state.silicon_revision = HAL_GetREVID();
+  /* Rev.V divides the selected ADC source by two internally. */
+  peripheral_clock.PLL3.PLL3N =
+      (adc_fft_measure_state.silicon_revision <= REV_ID_Y) ? 72U : 128U;
   peripheral_clock.PLL3.PLL3P = 2U;
   peripheral_clock.PLL3.PLL3Q = 2U;
   peripheral_clock.PLL3.PLL3R = 8U;
@@ -40,30 +42,18 @@ static uint8_t AdcFft_ConfigureAdcClock(void)
   peripheral_clock.PLL3.PLL3VCOSEL = RCC_PLL3VCOWIDE;
   peripheral_clock.PLL3.PLL3FRACN = 0U;
   peripheral_clock.AdcClockSelection = RCC_ADCCLKSOURCE_PLL3;
-  return (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock) == HAL_OK) ? 1U : 0U;
-}
-
-static uint8_t AdcFft_ShouldUseHann(const AdcFftMeasurementRequest *request,
-                                    uint16_t target_bin)
-{
-  uint64_t bin_frequency_hz;
-  uint32_t delta_hz;
-
-  if (request->window_mode == ADC_FFT_WINDOW_HANN)
-  {
-    return 1U;
-  }
-  if (request->window_mode == ADC_FFT_WINDOW_RECTANGULAR)
+  if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock) != HAL_OK)
   {
     return 0U;
   }
-
-  bin_frequency_hz = ((uint64_t)target_bin * request->sample_rate_hz) /
-                     ADC_FFT_SAMPLE_COUNT;
-  delta_hz = (request->reference_frequency_hz > bin_frequency_hz) ?
-             (uint32_t)(request->reference_frequency_hz - bin_frequency_hz) :
-             (uint32_t)(bin_frequency_hz - request->reference_frequency_hz);
-  return (((request->flags & 0x01U) != 0U) && (delta_hz <= 2UL)) ? 0U : 1U;
+  adc_source_hz = HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_ADC);
+  adc_fft_measure_state.adc_clock_hz =
+      (adc_fft_measure_state.silicon_revision <= REV_ID_Y) ?
+      adc_source_hz : (adc_source_hz / 2UL);
+  return (((adc_fft_measure_state.silicon_revision <= REV_ID_Y) &&
+           (adc_fft_measure_state.adc_clock_hz == 36000000UL)) ||
+          ((adc_fft_measure_state.silicon_revision > REV_ID_Y) &&
+           (adc_fft_measure_state.adc_clock_hz == 32000000UL))) ? 1U : 0U;
 }
 
 static uint8_t AdcFft_ConfigureDma(void)
@@ -93,22 +83,32 @@ static uint8_t AdcFft_ConfigureTimer(uint32_t sample_rate_hz)
 {
   TIM_MasterConfigTypeDef master = {0};
   uint32_t timer_clock_hz = HAL_RCC_GetPCLK1Freq();
+  uint32_t timer_period;
 
   if ((RCC->D2CFGR & RCC_D2CFGR_D2PPRE1) != 0U)
   {
     timer_clock_hz *= 2UL;
   }
-  if ((sample_rate_hz == 0UL) || (timer_clock_hz < sample_rate_hz) ||
-      ((timer_clock_hz % sample_rate_hz) != 0UL))
+  if ((sample_rate_hz == 0UL) || (timer_clock_hz < sample_rate_hz))
   {
     return 0U;
   }
+
+  timer_period = timer_clock_hz / sample_rate_hz;
+  if ((timer_period == 0UL) ||
+      ((timer_clock_hz / timer_period) != sample_rate_hz) ||
+      ((timer_clock_hz % timer_period) != 0UL))
+  {
+    return 0U;
+  }
+
+  adc_fft_measure_state.timer_clock_hz = timer_clock_hz;
 
   __HAL_RCC_TIM6_CLK_ENABLE();
   adc_fft_timer.Instance = TIM6;
   adc_fft_timer.Init.Prescaler = 0U;
   adc_fft_timer.Init.CounterMode = TIM_COUNTERMODE_UP;
-  adc_fft_timer.Init.Period = (timer_clock_hz / sample_rate_hz) - 1UL;
+  adc_fft_timer.Init.Period = timer_period - 1UL;
   adc_fft_timer.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   adc_fft_timer.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&adc_fft_timer) != HAL_OK)
@@ -118,7 +118,17 @@ static uint8_t AdcFft_ConfigureTimer(uint32_t sample_rate_hz)
 
   master.MasterOutputTrigger = TIM_TRGO_UPDATE;
   master.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  return (HAL_TIMEx_MasterConfigSynchronization(&adc_fft_timer, &master) == HAL_OK) ? 1U : 0U;
+  if (HAL_TIMEx_MasterConfigSynchronization(&adc_fft_timer, &master) != HAL_OK)
+  {
+    return 0U;
+  }
+
+  adc_fft_measure_state.timer_prescaler = adc_fft_timer.Instance->PSC;
+  adc_fft_measure_state.timer_period = adc_fft_timer.Instance->ARR;
+  adc_fft_measure_state.actual_sample_rate_hz = timer_clock_hz /
+      ((adc_fft_measure_state.timer_prescaler + 1UL) *
+       (adc_fft_measure_state.timer_period + 1UL));
+  return (adc_fft_measure_state.actual_sample_rate_hz == sample_rate_hz) ? 1U : 0U;
 }
 
 static uint8_t AdcFft_ConfigureAdc(void)
@@ -204,160 +214,163 @@ static uint8_t AdcFft_StartCapture(void)
   return 1U;
 }
 
-static void AdcFft_Fft(float *real, float *imag)
+static uint8_t AdcFft_Solve3x3(double matrix[3][4], double solution[3])
 {
-  uint16_t j = 0U;
-
-  for (uint16_t i = 1U; i < ADC_FFT_SAMPLE_COUNT; i++)
+  for (uint8_t column = 0U; column < 3U; column++)
   {
-    uint16_t bit = ADC_FFT_SAMPLE_COUNT >> 1;
-    while ((j & bit) != 0U)
-    {
-      j ^= bit;
-      bit >>= 1;
-    }
-    j ^= bit;
-    if (i < j)
-    {
-      float temp = real[i];
-      real[i] = real[j];
-      real[j] = temp;
-      temp = imag[i];
-      imag[i] = imag[j];
-      imag[j] = temp;
-    }
-  }
+    uint8_t pivot = column;
+    double pivot_abs = fabs(matrix[pivot][column]);
 
-  for (uint16_t length = 2U; length <= ADC_FFT_SAMPLE_COUNT; length <<= 1)
-  {
-    uint16_t half = length >> 1;
-    float angle = -ADC_FFT_TWO_PI / (float)length;
-    float step_real = cosf(angle);
-    float step_imag = sinf(angle);
-
-    for (uint16_t base = 0U; base < ADC_FFT_SAMPLE_COUNT; base += length)
+    for (uint8_t row = (uint8_t)(column + 1U); row < 3U; row++)
     {
-      float twiddle_real = 1.0f;
-      float twiddle_imag = 0.0f;
-      for (uint16_t k = 0U; k < half; k++)
+      double candidate_abs = fabs(matrix[row][column]);
+      if (candidate_abs > pivot_abs)
       {
-        uint16_t even = (uint16_t)(base + k);
-        uint16_t odd = (uint16_t)(even + half);
-        float odd_real = (real[odd] * twiddle_real) - (imag[odd] * twiddle_imag);
-        float odd_imag = (real[odd] * twiddle_imag) + (imag[odd] * twiddle_real);
-        float next_twiddle_real;
+        pivot = row;
+        pivot_abs = candidate_abs;
+      }
+    }
+    if (pivot_abs < ADC_FFT_FIT_PIVOT_MIN)
+    {
+      return 0U;
+    }
+    if (pivot != column)
+    {
+      for (uint8_t item = column; item < 4U; item++)
+      {
+        double temp = matrix[column][item];
+        matrix[column][item] = matrix[pivot][item];
+        matrix[pivot][item] = temp;
+      }
+    }
 
-        real[odd] = real[even] - odd_real;
-        imag[odd] = imag[even] - odd_imag;
-        real[even] += odd_real;
-        imag[even] += odd_imag;
-        next_twiddle_real = (twiddle_real * step_real) - (twiddle_imag * step_imag);
-        twiddle_imag = (twiddle_real * step_imag) + (twiddle_imag * step_real);
-        twiddle_real = next_twiddle_real;
+    for (uint8_t row = (uint8_t)(column + 1U); row < 3U; row++)
+    {
+      double factor = matrix[row][column] / matrix[column][column];
+      for (uint8_t item = column; item < 4U; item++)
+      {
+        matrix[row][item] -= factor * matrix[column][item];
       }
     }
   }
+
+  for (int8_t row = 2; row >= 0; row--)
+  {
+    double value = matrix[row][3];
+    for (uint8_t column = (uint8_t)(row + 1); column < 3U; column++)
+    {
+      value -= matrix[row][column] * solution[column];
+    }
+    solution[row] = value / matrix[row][row];
+  }
+  return 1U;
+}
+
+static int32_t AdcFft_RoundToI32(double value)
+{
+  return (value >= 0.0) ? (int32_t)(value + 0.5) : (int32_t)(value - 0.5);
 }
 
 static void AdcFft_ProcessFrame(void)
 {
   const AdcFftMeasurementRequest *request = &adc_fft_measure_state.active_request;
   AdcFftMeasurementResult result;
-  uint64_t sum = 0ULL;
   uint16_t adc_min = 0xFFFFU;
   uint16_t adc_max = 0U;
-  uint16_t target_bin = request->target_bin;
-  uint16_t search_start;
-  uint16_t search_end;
-  uint16_t best_bin = 0U;
-  float best_mag2 = 0.0f;
-  float coherent_gain_sum = 0.0f;
-  uint8_t use_hann;
+  uint32_t sample_rate_hz = adc_fft_measure_state.actual_sample_rate_hz;
+  double normal[3][4] = {{0.0}};
+  double coefficients[3] = {0.0, 0.0, 0.0};
+  double phase_step;
+  double step_sin;
+  double step_cos;
+  double basis_sin = 0.0;
+  double basis_cos = 1.0;
   uint32_t process_start = HAL_GetTick();
 
   memset(&result, 0, sizeof(result));
   result.sweep_id = request->sweep_id;
   result.point_id = request->point_id;
   result.reference_frequency_hz = request->reference_frequency_hz;
-  result.sample_rate_hz = request->sample_rate_hz;
-  result.status = ADC_FFT_STATUS_TIMER_TRIGGERED_DMA_CAPTURE;
+  result.sample_rate_hz = sample_rate_hz;
+  result.status = ADC_FFT_STATUS_TIMER_TRIGGERED_DMA_CAPTURE |
+                  ADC_FFT_STATUS_USED_LEAST_SQUARES;
+  adc_fft_measure_state.fit_sin_uv = 0;
+  adc_fft_measure_state.fit_cos_uv = 0;
+  adc_fft_measure_state.fit_offset_uv = 0;
 
   for (uint16_t i = 0U; i < ADC_FFT_SAMPLE_COUNT; i++)
   {
     uint16_t code = adc_fft_raw[i];
-    sum += code;
     if (code < adc_min) { adc_min = code; }
     if (code > adc_max) { adc_max = code; }
   }
 
-  if (target_bin == ADC_FFT_TARGET_BIN_AUTO)
-  {
-    target_bin = AdcFftMeasure_CalculateTargetBin(request->reference_frequency_hz,
-                                                  request->sample_rate_hz);
-  }
-  result.target_bin = target_bin;
+  result.target_bin = AdcFftMeasure_CalculateTargetBin(request->reference_frequency_hz,
+                                                       sample_rate_hz);
   result.adc_min_code = adc_min;
   result.adc_max_code = adc_max;
-  use_hann = AdcFft_ShouldUseHann(request, target_bin);
-  result.status |= (use_hann != 0U) ? ADC_FFT_STATUS_USED_HANN_WINDOW :
-                                      ADC_FFT_STATUS_USED_RECT_WINDOW;
 
   if ((adc_min <= ADC_FFT_OVERRANGE_LOW) || (adc_max >= ADC_FFT_OVERRANGE_HIGH))
   {
     result.status |= ADC_FFT_STATUS_ADC_OVERRANGE | ADC_FFT_STATUS_AMPLITUDE_SATURATED;
   }
 
+  phase_step = ((double)ADC_FFT_TWO_PI * (double)request->reference_frequency_hz) /
+               (double)sample_rate_hz;
+  step_sin = sin(phase_step);
+  step_cos = cos(phase_step);
+
   for (uint16_t i = 0U; i < ADC_FFT_SAMPLE_COUNT; i++)
   {
-    float window = 1.0f;
-    float centered = (float)((int32_t)adc_fft_raw[i] -
-                             (int32_t)(sum / ADC_FFT_SAMPLE_COUNT));
-    if (use_hann != 0U)
-    {
-      window = 0.5f - (0.5f * cosf((ADC_FFT_TWO_PI * (float)i) /
-                                    (float)(ADC_FFT_SAMPLE_COUNT - 1U)));
-    }
-    coherent_gain_sum += window;
-    adc_fft_real[i] = centered * ((float)ADC_FFT_VREF_UV /
-                                  (float)ADC_FFT_FULL_SCALE_CODE) * window;
-    adc_fft_imag[i] = 0.0f;
+    double sample = (double)adc_fft_raw[i];
+    double next_sin;
+
+    normal[0][0] += basis_sin * basis_sin;
+    normal[0][1] += basis_sin * basis_cos;
+    normal[0][2] += basis_sin;
+    normal[0][3] += sample * basis_sin;
+    normal[1][1] += basis_cos * basis_cos;
+    normal[1][2] += basis_cos;
+    normal[1][3] += sample * basis_cos;
+    normal[2][2] += 1.0;
+    normal[2][3] += sample;
+
+    next_sin = (basis_sin * step_cos) + (basis_cos * step_sin);
+    basis_cos = (basis_cos * step_cos) - (basis_sin * step_sin);
+    basis_sin = next_sin;
   }
 
-  AdcFft_Fft(adc_fft_real, adc_fft_imag);
-  search_start = (target_bin > ADC_FFT_SEARCH_HALF_WIDTH) ?
-                 (uint16_t)(target_bin - ADC_FFT_SEARCH_HALF_WIDTH) : 1U;
-  search_end = (uint16_t)(target_bin + ADC_FFT_SEARCH_HALF_WIDTH);
-  if (search_end >= (ADC_FFT_SAMPLE_COUNT / 2U))
-  {
-    search_end = (ADC_FFT_SAMPLE_COUNT / 2U) - 1U;
-  }
+  normal[1][0] = normal[0][1];
+  normal[2][0] = normal[0][2];
+  normal[2][1] = normal[1][2];
 
-  for (uint16_t bin = search_start; bin <= search_end; bin++)
-  {
-    float mag2 = (adc_fft_real[bin] * adc_fft_real[bin]) +
-                 (adc_fft_imag[bin] * adc_fft_imag[bin]);
-    if (mag2 > best_mag2)
-    {
-      best_mag2 = mag2;
-      best_bin = bin;
-    }
-  }
-
-  if ((best_bin == 0U) || (coherent_gain_sum <= 0.0f))
+  if (AdcFft_Solve3x3(normal, coefficients) == 0U)
   {
     result.status |= ADC_FFT_STATUS_LOW_SNR;
   }
   else
   {
-    float magnitude = sqrtf(best_mag2);
-    float peak_uv = (2.0f * magnitude) / coherent_gain_sum;
-    float rms_uv = peak_uv / ADC_FFT_SQRT2;
+    double uv_per_code = (double)ADC_FFT_VREF_UV /
+                         (double)ADC_FFT_FULL_SCALE_CODE;
+    double peak_uv = sqrt((coefficients[0] * coefficients[0]) +
+                          (coefficients[1] * coefficients[1])) * uv_per_code;
+    double rms_uv = peak_uv / (double)ADC_FFT_SQRT2;
+    double offset_uv = coefficients[2] * uv_per_code;
+    uint32_t peak_uv_rounded = (uint32_t)(peak_uv + 0.5);
+    int32_t offset_uv_rounded = AdcFft_RoundToI32(offset_uv);
 
-    result.main_bin = best_bin;
-    result.main_frequency_hz = (uint32_t)(((uint64_t)best_bin * request->sample_rate_hz) /
-                                          ADC_FFT_SAMPLE_COUNT);
-    result.voltage_uv_peak = (uint32_t)(peak_uv + 0.5f);
-    result.voltage_uv_rms = (uint32_t)(rms_uv + 0.5f);
+    adc_fft_measure_state.fit_sin_uv =
+        AdcFft_RoundToI32(coefficients[0] * uv_per_code);
+    adc_fft_measure_state.fit_cos_uv =
+        AdcFft_RoundToI32(coefficients[1] * uv_per_code);
+    adc_fft_measure_state.fit_offset_uv = offset_uv_rounded;
+    result.main_bin = result.target_bin;
+    result.main_frequency_hz = request->reference_frequency_hz;
+    result.voltage_uv_peak = peak_uv_rounded;
+    result.voltage_uv_rms = (uint32_t)(rms_uv + 0.5);
+    result.voltage_uv_min = offset_uv_rounded - (int32_t)peak_uv_rounded;
+    result.voltage_uv_max = offset_uv_rounded + (int32_t)peak_uv_rounded;
+    result.voltage_uv_pp = peak_uv_rounded * 2UL;
     if (result.voltage_uv_peak < 1000UL)
     {
       result.status |= ADC_FFT_STATUS_LOW_SNR;
@@ -388,8 +401,10 @@ static void AdcFft_SetCaptureError(uint16_t error)
   result->sweep_id = adc_fft_measure_state.active_request.sweep_id;
   result->point_id = adc_fft_measure_state.active_request.point_id;
   result->reference_frequency_hz = adc_fft_measure_state.active_request.reference_frequency_hz;
-  result->sample_rate_hz = adc_fft_measure_state.active_request.sample_rate_hz;
-  result->target_bin = adc_fft_measure_state.active_request.target_bin;
+  result->sample_rate_hz = adc_fft_measure_state.actual_sample_rate_hz;
+  result->target_bin = AdcFftMeasure_CalculateTargetBin(
+      adc_fft_measure_state.active_request.reference_frequency_hz,
+      result->sample_rate_hz);
   result->status = error;
   adc_fft_measure_state.last_error = error;
   adc_fft_measure_state.error_count++;
@@ -410,9 +425,7 @@ void AdcFftMeasure_Init(void)
 
 uint8_t AdcFftMeasure_IsSupportedSampleRate(uint32_t sample_rate_hz)
 {
-  return ((sample_rate_hz == 1000000UL) ||
-          (sample_rate_hz == 2000000UL) ||
-          (sample_rate_hz == 4000000UL)) ? 1U : 0U;
+  return (sample_rate_hz == ADC_FFT_DEFAULT_SAMPLE_RATE) ? 1U : 0U;
 }
 
 uint16_t AdcFftMeasure_CalculateTargetBin(uint32_t frequency_hz, uint32_t sample_rate_hz)

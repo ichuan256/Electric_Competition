@@ -4,7 +4,7 @@
 #include "stm32h7xx_hal.h"
 
 #define ADC_FFT_SAMPLE_COUNT          4096U
-#define ADC_FFT_DEFAULT_SAMPLE_RATE   2000000UL
+#define ADC_FFT_DEFAULT_SAMPLE_RATE   2500000UL
 #define ADC_FFT_TARGET_BIN_AUTO       0xFFFFU
 
 #define ADC_FFT_STATUS_VALID                    0x0001U
@@ -19,6 +19,7 @@
 #define ADC_FFT_STATUS_USED_RECT_WINDOW         0x0200U
 #define ADC_FFT_STATUS_TIMER_TRIGGERED_DMA_CAPTURE 0x0400U
 #define ADC_FFT_STATUS_ADC_DMA_ERROR            0x0800U
+#define ADC_FFT_STATUS_USED_LEAST_SQUARES        0x1000U
 
 typedef enum {
   ADC_FFT_WINDOW_AUTO = 0,
@@ -59,6 +60,9 @@ typedef struct {
   uint32_t main_frequency_hz;
   uint32_t voltage_uv_rms;
   uint32_t voltage_uv_peak;
+  int32_t voltage_uv_min;
+  int32_t voltage_uv_max;
+  uint32_t voltage_uv_pp;
   uint32_t sample_rate_hz;
   uint16_t target_bin;
   uint16_t main_bin;
@@ -74,6 +78,15 @@ typedef struct {
   uint32_t error_count;
   uint32_t last_capture_ticks;
   uint32_t last_process_ticks;
+  uint32_t silicon_revision;
+  uint32_t adc_clock_hz;
+  uint32_t timer_clock_hz;
+  uint32_t timer_prescaler;
+  uint32_t timer_period;
+  uint32_t actual_sample_rate_hz;
+  int32_t fit_sin_uv;
+  int32_t fit_cos_uv;
+  int32_t fit_offset_uv;
   uint16_t last_error;
   AdcFftMeasurementRequest active_request;
   AdcFftMeasurementResult last_result;

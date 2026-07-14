@@ -1,9 +1,9 @@
-# On-board ADC FFT Measurement Design
+# On-board ADC Sine Measurement Design
 
-本文定义由 FFT 测量板使用板上 ADC 采样并在 MCU 端完成 FFT 的重构方案。Black 板负责驱动 DDS，FFT 测量板负责在 DDS 稳定后采样、计算主频幅度，并把结果包装成：
+本文定义由测量板使用板上 ADC 采样，并在 MCU 端通过正弦最小二乘拟合计算幅度的方案。Black 板负责驱动 DDS，测量板负责在 DDS 稳定后采样、计算参考频率对应的幅度，并把结果包装成：
 
 ```text
-reference_frequency_hz -> main_frequency_hz, voltage_mv_rms
+reference_frequency_hz -> main_frequency_hz, voltage_uv_rms
 ```
 
 上层业务默认只消费“主频对应的电压值”，不直接依赖原始 ADC 波形或完整频谱。
@@ -11,26 +11,17 @@ reference_frequency_hz -> main_frequency_hz, voltage_mv_rms
 ## 1. 目标与边界
 
 - 单帧采样点数固定 `N = 4096`。
-- 采样率可配置，首版默认使用稳定档 `Fs = 2,000,000 Hz`。
-- 若 ADC、DMA、模拟前端和 FFT 处理均稳定，可切换到高速档 `Fs = 4,000,000 Hz`。
+- 采样率固定为硬件可保证的 `Fs = 2,500,000 Hz`。
 - 采样由定时器硬件触发，DMA 搬运整帧数据，软件只在 DMA 完成中断后处理。
 - Black 板必须先完成 DDS 设置并等待输出稳定，再向 FFT 测量板发起采样请求。
 - FFT 测量板不主动改变 DDS，也不根据 UI 频率猜测当前测量点。
 - 本轮重构只新增 FFT 测量和通信协议模块，不改动显示、DDS、AGC、旧串口协议等已有模块。
 
-采样率档位建议：
-
-| 档位 | `Fs` | 4096点采样时间 | 频率分辨率 `df = Fs/N` | 用途 |
-|---|---:|---:|---:|---|
-| stable | 2,000,000 Hz | 2.048 ms | 488.28125 Hz | 默认稳定档 |
-| fast | 4,000,000 Hz | 1.024 ms | 976.5625 Hz | 硬件验证后启用 |
-| safe | 1,000,000 Hz | 4.096 ms | 244.140625 Hz | 调试/前端带宽较低时 |
-
-首版建议固定 `2 MHz`，把串口握手、DMA 时序、FFT 幅度标定跑稳后再开放 `4 MHz`。
+4096 点采样耗时为 `1.6384 ms`。TIM6 的 PSC/ARR 配置完成后，软件必须从寄存器反算真实采样率；反算值与请求值不一致时拒绝启动采样。
 
 ## 2. 采样架构
 
-不采用“每个采样点进一次定时器中断 + 软件读取 ADC”的方式。2 MHz 或 4 MHz 下逐点中断都会让 CPU 负载和采样抖动不可控。推荐链路：
+不采用“每个采样点进一次定时器中断 + 软件读取 ADC”的方式。2.5 MHz下逐点中断会让CPU负载和采样抖动不可控。推荐链路：
 
 ```text
 TIMx update/TRGO at Fs
@@ -110,8 +101,7 @@ Black USART3_RX PB11  <- Blue USART1_TX PA9
 Black GND             --- Blue GND
 ```
 
-普通测量默认优先使用 `Fs = 2 MHz`。现有 LCR 测试模式保持 `1 MHz` DDS 激励不变，
-为了避开 `Fs/2` 奈奎斯特边界，该测试请求固定使用 `Fs = 4 MHz`。
+现有 LCR 测试模式保持 `1 MHz` DDS 激励不变，采样请求固定使用 `Fs = 2.5 MHz`，避免 `Fs/2` 奈奎斯特边界。
 
 命令分配：
 
@@ -133,7 +123,7 @@ Black 必须在 DDS 设置完成并等待稳定后发送。PAYLOAD 固定 28 字
 | 2 | uint16 | `point_id` |
 | 4 | uint32 | `reference_frequency_hz`，DDS 实际输出频率 |
 | 8 | uint32 | `dds_ftw`，没有则填 0 |
-| 12 | uint32 | `sample_rate_hz`，建议 2000000，允许 1000000/4000000 |
+| 12 | uint32 | `sample_rate_hz`，当前固定 2500000 |
 | 16 | uint16 | `fft_length`，固定 4096 |
 | 18 | uint16 | `target_bin`，Black 可填 0xFFFF 表示由 FFT 板计算 |
 | 20 | uint32 | `settle_us`，Black 已经等待过的 DDS 稳定时间 |
@@ -215,10 +205,11 @@ bit8 used_hann_window
 bit9 used_rectangular_window
 bit10 timer_triggered_dma_capture
 bit11 adc_dma_error
+bit12 used_least_squares
 ```
 
-Blue 当前实现使用独立 PLL3R 为 ADC 提供 48 MHz 内核时钟，ADC1 保持 16 位、2.5 周期采样时间。
-TIM6 由 240 MHz APB1 定时器时钟分频，生成精确的 1/2/4 MHz TRGO；DMA1 Stream1
+Blue 根据芯片修订版本配置 ADC 时钟：Rev.Y 为 36 MHz，Rev.V 的有效 ADC 时钟为 32 MHz。ADC1 保持16位、2.5周期采样时间。
+TIM6 由240 MHz APB1定时器时钟分频，生成精确的2.5 MHz TRGO；DMA1 Stream1
 以 normal 模式一次搬运 4096 个 halfword。原始缓冲由链接器放在 AXI SRAM，并按
 32 字节对齐；DMA 完成后先停止 TIM6，再做 D-Cache invalidate，随后才进入主频幅度计算。
 
@@ -247,47 +238,25 @@ PAYLOAD 固定 12 字节：
 8 protocol_crc_error
 ```
 
-## 5. 频率与频点计算
+## 5. 采样率一致性
 
-FFT 板按请求中的 `sample_rate_hz` 计算目标 bin：
-
-```text
-target_bin = round(reference_frequency_hz * 4096 / sample_rate_hz)
-bin_frequency_hz = target_bin * sample_rate_hz / 4096
-```
-
-如果 Black 可以让 DDS 落在整数 FFT 点，优先使用：
+采样频率由 TIM6 TRGO 决定：
 
 ```text
-reference_frequency_hz = k * sample_rate_hz / 4096
+timer_clock_hz = 240000000
+PSC = 0
+ARR = 95
+actual_sample_rate_hz = timer_clock_hz / ((PSC + 1) * (ARR + 1))
+                      = 2500000 Hz
 ```
 
-2 MHz 档位下：
+协议请求、TIM6配置、最小二乘时间轴、回传结果和屏幕显示都必须使用该值。Blue 在定时器初始化完成后读取实际 PSC/ARR 反算；结果不等于请求值时，本次采样启动失败。
 
-```text
-df = 2,000,000 / 4096 = 488.28125 Hz
-```
+`target_bin` 和 `main_bin` 字段为兼容现有协议保留，按真实采样率计算近似频点；最小二乘算法本身不依赖整数频点。
 
-4 MHz 档位下：
+## 6. ADC 数据检查
 
-```text
-df = 4,000,000 / 4096 = 976.5625 Hz
-```
-
-若 DDS 无法精确落在整数 bin，FFT 板使用 Hann 窗，并在 `target_bin +/- 2` 内找最大峰作为主频。
-
-## 6. ADC 数据预处理
-
-ADC 原始码先去 DC，再换算成电压序列：
-
-```text
-dc_code = mean(adc_raw[0..4095])
-x_code[n] = adc_raw[n] - dc_code
-adc_lsb_uv = vref_uv / adc_full_scale_code
-x_uv[n] = x_code[n] * adc_lsb_uv / analog_gain
-```
-
-每帧记录：
+每帧保留原始最小值和最大值：
 
 ```text
 adc_min_code
@@ -295,55 +264,40 @@ adc_max_code
 adc_overrange = adc_min_code <= low_limit || adc_max_code >= high_limit
 ```
 
-如果前端有固定偏置，可保留慢速校准值 `adc_mid`，但每帧仍建议减均值，避免 DC bin 污染低频测量。
+直流偏置不再预先减均值，而是作为最小二乘模型中的常数项 `c` 一起求解。
 
-## 7. 窗函数策略
+## 7. 正弦最小二乘模型
 
-默认策略：
+已知 DDS 实际参考频率 `f` 和真实采样率 `Fs`，对4096个样本拟合：
 
 ```text
-if request_flags.bit0 coherent_hint && abs(reference_frequency_hz - target_bin*Fs/N) 很小:
-    rectangular window
-else:
-    Hann window
+y[n] = a*sin(2*pi*f*n/Fs) + b*cos(2*pi*f*n/Fs) + c
 ```
 
-Hann 窗 coherent gain：
+构造三列设计矩阵 `[sin, cos, 1]`，累加3x3正规方程并使用带主元选择的高斯消元求出 `a`、`b`、`c`。因此即使采样窗口不是整数周期，也不需要 Hann 窗或 FFT 频点搜索。
+
+全局调试状态保留：
 
 ```text
-CG = sum(w[n]) / N ~= 0.5
+fit_sin_uv     = a
+fit_cos_uv     = b
+fit_offset_uv  = c
 ```
 
-rectangular 窗：
+## 8. 幅值计算
+
+拟合系数先由ADC码值换算为微伏，随后计算：
 
 ```text
-CG = 1.0
-```
-
-FFT 幅度换算必须除以 `CG`。
-
-## 8. 主频幅度计算
-
-FFT 输入为 `x_uv[n]`。RFFT 输出频谱 `X[k]`，只使用 `1..2047`。
-
-主频搜索：
-
-```text
-search_start = max(1, target_bin - 2)
-search_end   = min(2047, target_bin + 2)
-main_bin     = argmax(real[k]^2 + imag[k]^2)
-main_frequency_hz = main_bin * sample_rate_hz / 4096
-```
-
-幅度：
-
-```text
-mag = sqrt(real[main_bin]^2 + imag[main_bin]^2)
-voltage_uv_peak = 2 * mag / (4096 * CG)
+voltage_uv_peak = sqrt(a*a + b*b)
 voltage_uv_rms  = voltage_uv_peak / sqrt(2)
+voltage_uv_min  = c - voltage_uv_peak
+voltage_uv_max  = c + voltage_uv_peak
+voltage_uv_pp   = 2 * voltage_uv_peak
+main_frequency_hz = reference_frequency_hz
 ```
 
-若 `main_bin` 不在参考频率附近或峰值过低，置位 `peak_not_near_reference` 或 `low_snr`，结果可以回传，但 `result_valid` 不应置位。
+若正规方程不可解或拟合幅值过低，置位 `low_snr`，结果可以回传，但 `result_valid` 不置位。
 
 ## 9. 重构模块边界
 
@@ -367,10 +321,10 @@ User/Src/AdcFftProtocol_User.c
 
 `AdcFftMeasure_User`：
 
-- 配置采样率档位。
+- 配置固定2.5 MHz采样率，并从定时器寄存器核对真实值。
 - 启动 TIM/ADC/DMA 单帧采样。
 - 处理 DMA 完成和错误状态。
-- 做去 DC、窗函数、RFFT、主频搜索和电压换算。
+- 使用 `a*sin()+b*cos()+c` 最小二乘拟合并完成电压换算。
 - 输出 `AdcFftMeasurementResult`。
 
 对外接口建议：
@@ -422,22 +376,21 @@ ADC_FFT_ERROR
 
 1. 先实现协议解析和回包，不接 ADC，使用假数据回 `MEASURE_RESULT`。
 2. Black 侧完成 DDS 设置、等待稳定、发送 `MEASURE_REQUEST`、接收并绑定结果。
-3. FFT 板接入 TIM/ADC/DMA，先用 `1 MHz` 或 `2 MHz` 验证采样完整性。
-4. 接入 CMSIS-DSP RFFT，使用固定测试正弦验证 `main_bin`。
+3. 测量板接入 TIM/ADC/DMA，使用2.5 MHz验证采样完整性。
+4. 使用固定测试正弦验证最小二乘系数 `a/b/c`。
 5. 加入电压标定系数，验证 `voltage_uv_rms`。
-6. 稳定后再打开 `4 MHz` 档位。
-7. 最后把业务层结果来源替换为 `AdcFftMeasurementResult`。
+6. 最后把业务层结果来源替换为 `AdcFftMeasurementResult`。
 
 ## 11. 关键验收项
 
 - Black 在 DDS 稳定等待完成后才发送 `MEASURE_REQUEST`。
 - FFT 板收到合法请求后先回 `REQUEST_ACCEPTED`，再启动采样。
 - 当前测量未结束时，新请求返回 `BUSY`，不会覆盖当前帧。
-- `sample_rate_hz=2 MHz` 时，4096 点采样耗时约 `2.048 ms`。
-- `sample_rate_hz=4 MHz` 时，4096 点采样耗时约 `1.024 ms`。
+- 请求、TIM6寄存器反算、计算时间轴和结果回传的采样率均为 `2.5 MHz`。
+- `sample_rate_hz=2.5 MHz` 时，4096点采样耗时约 `1.6384 ms`。
 - DMA 完成中断每帧只触发一次，不存在每采样点中断。
-- 输入整数 bin 正弦时，`main_bin == target_bin`。
-- 输入非整数 bin 正弦时，`main_bin` 在 `target_bin +/- 2` 内。
-- Hann/rectangular 模式经过 `CG` 修正后，同幅度输入的电压结果接近。
+- 输入非整数周期正弦时，最小二乘幅值仍与示波器测量值接近。
+- 改变输入相位时，`a/b`发生变化，但 `sqrt(a*a+b*b)`保持稳定。
+- 改变直流偏置时，`c`跟随变化，交流幅值保持稳定。
 - ADC 过量程时 `adc_overrange` 置位，`result_valid` 不置位。
 - Black 用 `SEQ + sweep_id + point_id + reference_frequency_hz` 绑定结果，不能把旧结果挂到新 DDS 点上。
