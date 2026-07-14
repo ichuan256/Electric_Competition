@@ -15,20 +15,30 @@
 #define FPGA_UART_ACK_TIMEOUT_MS    100UL
 #define FPGA_UART_MAX_RETRY         2U
 #define FPGA_UART_TX_TIMEOUT_MS     50U
+#define FPGA_UART_WAIT_DAC_ACK      1U
+#define FPGA_UART_WAIT_FFT_RESULT   2U
+#define FPGA_UART_RX_DMA_BUF_LEN    256U
+#define FPGA_UART_RX_DMA_BUF_ADDR   0x24070000UL
 #define FPGA_UART_SAMPLE_CLK_HZ     100000000ULL
 #define FPGA_UART_ENTRY_LEN         13U
 #define FPGA_UART_FRAME_MAX_LEN     (2U + 2U + (FPGA_UART_SUM_MAX_WAVES * FPGA_UART_ENTRY_LEN) + 2U + 1U + 2U)
+#define FPGA_UART_RX_DMA_BUF        ((uint8_t *)FPGA_UART_RX_DMA_BUF_ADDR)
 
 static FpgaUartState fpga_uart_state;
 static uint32_t fpga_uart_last_tx_tick;
 static uint32_t fpga_uart_last_ack_wait_tick;
+static uint32_t fpga_uart_ack_timeout_ms;
 static uint8_t fpga_uart_ack_buf[FPGA_UART_ACK_LEN];
 static uint8_t fpga_uart_ack_pos;
 static uint8_t fpga_uart_frame[FPGA_UART_FRAME_MAX_LEN];
 static uint8_t fpga_uart_frame_len;
 static uint8_t fpga_uart_frame_sent;
 static uint8_t fpga_uart_waiting_ack;
+static uint8_t fpga_uart_wait_kind;
 static uint8_t fpga_uart_retry_count;
+static uint8_t fpga_uart_fft_seq;
+static uint16_t fpga_uart_rx_dma_read_pos;
+static uint8_t fpga_uart_rx_dma_active;
 
 static uint8_t FpgaUart_Checksum(const uint8_t *data, uint8_t len)
 {
@@ -100,11 +110,152 @@ static void FpgaUart_ClearUartErrors(void)
   }
 }
 
+static void FpgaUart_ProcessRxByte(uint8_t byte)
+{
+  uint8_t fft_status;
+
+  fpga_uart_state.last_rx_status = HAL_OK;
+  fft_status = FftUart_PushRxByte(byte);
+  if ((fft_status & FFT_UART_RX_CONSUMED) != 0U)
+  {
+    if (((fft_status & FFT_UART_RX_RESULT_READY) != 0U) &&
+        (fpga_uart_wait_kind == FPGA_UART_WAIT_FFT_RESULT))
+    {
+      fpga_uart_waiting_ack = 0U;
+      fpga_uart_wait_kind = 0U;
+      fpga_uart_state.waiting_ack = 0U;
+      fpga_uart_retry_count = 0U;
+      fpga_uart_state.retry_count = 0U;
+      fpga_uart_state.queue_index = fpga_uart_state.queue_count;
+      fpga_uart_state.dirty_mask = 0U;
+    }
+    return;
+  }
+
+  fpga_uart_ack_buf[fpga_uart_ack_pos++] = byte;
+
+  if ((fpga_uart_ack_pos == 1U) && (byte != FPGA_UART_ACK_HEADER))
+  {
+    fpga_uart_ack_pos = 0U;
+    fpga_uart_state.error_count++;
+    return;
+  }
+
+  if (fpga_uart_ack_pos >= FPGA_UART_ACK_LEN)
+  {
+    fpga_uart_state.rx_value = fpga_uart_ack_buf[1];
+    fpga_uart_state.has_rx = 1U;
+    fpga_uart_state.rx_count++;
+
+    if (fpga_uart_ack_buf[3] == FpgaUart_Checksum(fpga_uart_ack_buf, 3U))
+    {
+      fpga_uart_state.last_ack_cmd = fpga_uart_ack_buf[1];
+      fpga_uart_state.last_ack_status = fpga_uart_ack_buf[2];
+
+      if ((fpga_uart_wait_kind == FPGA_UART_WAIT_DAC_ACK) &&
+          (fpga_uart_ack_buf[1] == FPGA_UART_ACK_CMD) &&
+          (fpga_uart_ack_buf[2] == FPGA_UART_ACK_OK) &&
+          (fpga_uart_ack_buf[3] == FPGA_UART_ACK_XOR_OK))
+      {
+        fpga_uart_waiting_ack = 0U;
+        fpga_uart_wait_kind = 0U;
+        fpga_uart_state.waiting_ack = 0U;
+        fpga_uart_retry_count = 0U;
+        fpga_uart_state.retry_count = 0U;
+        fpga_uart_state.queue_index = fpga_uart_state.queue_count;
+        fpga_uart_state.dirty_mask = 0U;
+      }
+      else
+      {
+        fpga_uart_state.error_count++;
+      }
+    }
+    else
+    {
+      fpga_uart_state.error_count++;
+    }
+    fpga_uart_ack_pos = 0U;
+  }
+}
+
+static void FpgaUart_StartRxDma(void)
+{
+  HAL_StatusTypeDef status;
+  uint8_t *rx_buf = FPGA_UART_RX_DMA_BUF;
+
+  for (uint16_t i = 0U; i < FPGA_UART_RX_DMA_BUF_LEN; i++)
+  {
+    rx_buf[i] = 0U;
+  }
+  SCB_CleanInvalidateDCache_by_Addr((uint32_t *)FPGA_UART_RX_DMA_BUF_ADDR,
+                                    FPGA_UART_RX_DMA_BUF_LEN);
+
+  fpga_uart_rx_dma_read_pos = 0U;
+  status = HAL_UART_Receive_DMA(&huart2, rx_buf, FPGA_UART_RX_DMA_BUF_LEN);
+  fpga_uart_state.last_rx_status = status;
+  if (status == HAL_OK)
+  {
+    fpga_uart_rx_dma_active = 1U;
+    fpga_uart_state.rx_dma_active = 1U;
+    if (huart2.hdmarx != 0)
+    {
+      __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
+      __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_TC);
+    }
+  }
+  else
+  {
+    fpga_uart_rx_dma_active = 0U;
+    fpga_uart_state.rx_dma_active = 0U;
+    fpga_uart_state.error_count++;
+  }
+}
+
+static void FpgaUart_ReadDmaBytes(void)
+{
+  uint16_t write_pos;
+  uint16_t guard = 0U;
+
+  if ((fpga_uart_rx_dma_active == 0U) || (huart2.hdmarx == 0))
+  {
+    FpgaUart_StartRxDma();
+    return;
+  }
+
+  SCB_InvalidateDCache_by_Addr((uint32_t *)FPGA_UART_RX_DMA_BUF_ADDR,
+                               FPGA_UART_RX_DMA_BUF_LEN);
+
+  write_pos = (uint16_t)(FPGA_UART_RX_DMA_BUF_LEN - __HAL_DMA_GET_COUNTER(huart2.hdmarx));
+  if (write_pos >= FPGA_UART_RX_DMA_BUF_LEN)
+  {
+    write_pos = 0U;
+  }
+
+  fpga_uart_state.rx_dma_write_pos = write_pos;
+  fpga_uart_state.rx_dma_read_pos = fpga_uart_rx_dma_read_pos;
+
+  while ((fpga_uart_rx_dma_read_pos != write_pos) && (guard < FPGA_UART_RX_DMA_BUF_LEN))
+  {
+    uint8_t byte = FPGA_UART_RX_DMA_BUF[fpga_uart_rx_dma_read_pos++];
+    if (fpga_uart_rx_dma_read_pos >= FPGA_UART_RX_DMA_BUF_LEN)
+    {
+      fpga_uart_rx_dma_read_pos = 0U;
+    }
+    fpga_uart_state.rx_dma_count++;
+    FpgaUart_ProcessRxByte(byte);
+    guard++;
+  }
+
+  fpga_uart_state.rx_dma_read_pos = fpga_uart_rx_dma_read_pos;
+}
+
 static void FpgaUart_ClearFrame(void)
 {
   fpga_uart_frame_len = 0U;
   fpga_uart_frame_sent = 0U;
   fpga_uart_waiting_ack = 0U;
+  fpga_uart_wait_kind = 0U;
+  fpga_uart_ack_timeout_ms = FPGA_UART_ACK_TIMEOUT_MS;
   fpga_uart_retry_count = 0U;
   fpga_uart_state.dirty_mask = 0U;
   fpga_uart_state.queue_count = 0U;
@@ -130,8 +281,24 @@ static void FpgaUart_LoadFrame(const uint8_t *frame, uint8_t frame_len)
   fpga_uart_state.dirty_mask = 1U;
   fpga_uart_state.queue_count = 1U;
   fpga_uart_state.queue_index = 0U;
-  fpga_uart_state.last_cmd = frame[2];
+  if ((frame_len >= 5U) && (frame[0] == 0xF9U) && (frame[1] == 0x26U))
+  {
+    fpga_uart_state.last_cmd = frame[4];
+  }
+  else
+  {
+    fpga_uart_state.last_cmd = frame[2];
+  }
   fpga_uart_state.last_data = frame_len;
+  if ((frame_len >= 2U) && (frame[0] == 0xF9U) && (frame[1] == 0x26U))
+  {
+    fpga_uart_wait_kind = FPGA_UART_WAIT_FFT_RESULT;
+  }
+  else
+  {
+    fpga_uart_wait_kind = FPGA_UART_WAIT_DAC_ACK;
+  }
+  fpga_uart_ack_timeout_ms = FPGA_UART_ACK_TIMEOUT_MS;
 }
 
 static void FpgaUart_ReadAck(void)
@@ -140,54 +307,13 @@ static void FpgaUart_ReadAck(void)
   uint8_t guard = 0U;
 
   FpgaUart_ClearUartErrors();
+  FpgaUart_ReadDmaBytes();
 
   while ((__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET) && (guard < 16U))
   {
     byte = (uint8_t)(huart2.Instance->RDR & 0xFFU);
-    fpga_uart_state.last_rx_status = HAL_OK;
     guard++;
-    fpga_uart_ack_buf[fpga_uart_ack_pos++] = byte;
-
-    if ((fpga_uart_ack_pos == 1U) && (byte != FPGA_UART_ACK_HEADER))
-    {
-      fpga_uart_ack_pos = 0U;
-      fpga_uart_state.error_count++;
-      return;
-    }
-
-    if (fpga_uart_ack_pos >= FPGA_UART_ACK_LEN)
-    {
-      fpga_uart_state.rx_value = fpga_uart_ack_buf[1];
-      fpga_uart_state.has_rx = 1U;
-      fpga_uart_state.rx_count++;
-
-      if (fpga_uart_ack_buf[3] == FpgaUart_Checksum(fpga_uart_ack_buf, 3U))
-      {
-        fpga_uart_state.last_ack_cmd = fpga_uart_ack_buf[1];
-        fpga_uart_state.last_ack_status = fpga_uart_ack_buf[2];
-
-        if ((fpga_uart_ack_buf[1] == FPGA_UART_ACK_CMD) &&
-            (fpga_uart_ack_buf[2] == FPGA_UART_ACK_OK) &&
-            (fpga_uart_ack_buf[3] == FPGA_UART_ACK_XOR_OK))
-        {
-          fpga_uart_waiting_ack = 0U;
-          fpga_uart_state.waiting_ack = 0U;
-          fpga_uart_retry_count = 0U;
-          fpga_uart_state.retry_count = 0U;
-          fpga_uart_state.queue_index = fpga_uart_state.queue_count;
-          fpga_uart_state.dirty_mask = 0U;
-        }
-        else
-        {
-          fpga_uart_state.error_count++;
-        }
-      }
-      else
-      {
-        fpga_uart_state.error_count++;
-      }
-      fpga_uart_ack_pos = 0U;
-    }
+    FpgaUart_ProcessRxByte(byte);
   }
 }
 
@@ -204,10 +330,19 @@ void FpgaUart_Init(void)
   fpga_uart_state.error_count = 0UL;
   fpga_uart_state.last_tx_status = HAL_OK;
   fpga_uart_state.last_rx_status = HAL_OK;
+  fpga_uart_state.rx_dma_active = 0U;
+  fpga_uart_state.rx_dma_write_pos = 0U;
+  fpga_uart_state.rx_dma_read_pos = 0U;
+  fpga_uart_state.rx_dma_count = 0UL;
   fpga_uart_ack_pos = 0U;
+  fpga_uart_rx_dma_read_pos = 0U;
+  fpga_uart_rx_dma_active = 0U;
+  fpga_uart_fft_seq = 1U;
   fpga_uart_last_tx_tick = HAL_GetTick();
   fpga_uart_last_ack_wait_tick = fpga_uart_last_tx_tick;
   FpgaUart_ClearFrame();
+  FftUart_Init();
+  FpgaUart_StartRxDma();
 }
 
 void FpgaUart_Task(void)
@@ -218,10 +353,11 @@ void FpgaUart_Task(void)
   FpgaUart_ReadAck();
 
   if ((fpga_uart_waiting_ack != 0U) &&
-      ((now - fpga_uart_last_ack_wait_tick) >= FPGA_UART_ACK_TIMEOUT_MS))
+      ((now - fpga_uart_last_ack_wait_tick) >= fpga_uart_ack_timeout_ms))
   {
     fpga_uart_state.error_count++;
     fpga_uart_waiting_ack = 0U;
+    fpga_uart_wait_kind = 0U;
     fpga_uart_state.waiting_ack = 0U;
     if (fpga_uart_retry_count < FPGA_UART_MAX_RETRY)
     {
@@ -248,10 +384,29 @@ void FpgaUart_Task(void)
     if (status == HAL_OK)
     {
       fpga_uart_state.tx_count++;
-      fpga_uart_state.last_cmd = fpga_uart_frame[2];
+      if ((fpga_uart_frame_len >= 5U) &&
+          (fpga_uart_frame[0] == 0xF9U) &&
+          (fpga_uart_frame[1] == 0x26U))
+      {
+        fpga_uart_state.last_cmd = fpga_uart_frame[4];
+      }
+      else
+      {
+        fpga_uart_state.last_cmd = fpga_uart_frame[2];
+      }
       fpga_uart_state.last_data = fpga_uart_frame_len;
       fpga_uart_frame_sent = 1U;
       fpga_uart_waiting_ack = 1U;
+      if ((fpga_uart_frame_len >= 2U) &&
+          (fpga_uart_frame[0] == 0xF9U) &&
+          (fpga_uart_frame[1] == 0x26U))
+      {
+        fpga_uart_wait_kind = FPGA_UART_WAIT_FFT_RESULT;
+      }
+      else
+      {
+        fpga_uart_wait_kind = FPGA_UART_WAIT_DAC_ACK;
+      }
       fpga_uart_state.waiting_ack = 1U;
       fpga_uart_state.queue_index = 1U;
       fpga_uart_last_ack_wait_tick = now;
@@ -320,6 +475,8 @@ void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
   fpga_uart_state.queue_index = 0U;
   fpga_uart_state.last_cmd = target;
   fpga_uart_state.last_data = fpga_uart_frame_len;
+  fpga_uart_wait_kind = FPGA_UART_WAIT_DAC_ACK;
+  fpga_uart_ack_timeout_ms = FPGA_UART_ACK_TIMEOUT_MS;
 }
 
 void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phase_deg,
@@ -362,6 +519,22 @@ void FpgaUart_SendTestFrame(void)
   };
 
   FpgaUart_LoadFrame(test_frame, (uint8_t)sizeof(test_frame));
+}
+
+void FpgaUart_SendFftMeasureRequest(const FftUartMeasureRequest *request)
+{
+  uint8_t frame[FFT_UART_FRAME_MAX_LEN];
+  uint16_t frame_len;
+
+  frame_len = FftUart_BuildMeasureFrame(frame, (uint16_t)sizeof(frame), request, fpga_uart_fft_seq);
+  if ((frame_len == 0U) || (frame_len > 0xFFU))
+  {
+    return;
+  }
+
+  fpga_uart_fft_seq++;
+  FpgaUart_LoadFrame(frame, (uint8_t)frame_len);
+  fpga_uart_ack_timeout_ms = ((request->settle_us + 999UL) / 1000UL) + 100UL;
 }
 
 FpgaUartState FpgaUart_GetState(void)

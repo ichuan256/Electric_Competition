@@ -461,6 +461,11 @@
               <FilePath>../User/Src/FpgaUart_User.c</FilePath>
             </File>
             <File>
+              <FileName>FftUart_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/FftUart_User.c</FilePath>
+            </File>
+            <File>
               <FileName>mpu.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/BSP/MPU/mpu.c</FilePath>

@@ -2,6 +2,7 @@
 #define _FPGA_UART_USER_H_
 
 #include "stm32h7xx_hal.h"
+#include "FftUart_User.h"
 
 #define FPGA_UART_SUM_MAX_WAVES 4U
 
@@ -30,6 +31,10 @@ typedef struct {
   uint8_t queue_index;
   uint8_t waiting_ack;
   uint8_t retry_count;
+  uint8_t rx_dma_active;
+  uint16_t rx_dma_write_pos;
+  uint16_t rx_dma_read_pos;
+  uint32_t rx_dma_count;
   HAL_StatusTypeDef last_tx_status;
   HAL_StatusTypeDef last_rx_status;
 } FpgaUartState;
@@ -46,6 +51,7 @@ void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phas
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
                      const FpgaUartWaveConfig *waves);
 void FpgaUart_SendTestFrame(void);
+void FpgaUart_SendFftMeasureRequest(const FftUartMeasureRequest *request);
 FpgaUartState FpgaUart_GetState(void);
 
 #endif

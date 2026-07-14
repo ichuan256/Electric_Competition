@@ -9,6 +9,9 @@
 #define SPECTRUM_DISPLAY_SUM_MAX_WAVES 4U
 #define SPECTRUM_DISPLAY_SUM_FIELD_COUNT 11U
 
+#define SPECTRUM_DISPLAY_MODE_SUM_WAVEFORM 0U
+#define SPECTRUM_DISPLAY_MODE_LCR_TEST     1U
+
 typedef struct {
   uint32_t frequency_hz;
   uint16_t phase_deg;

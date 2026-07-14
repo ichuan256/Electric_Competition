@@ -385,6 +385,13 @@ static void Spectrum_UpdateDdsSine(void)
   dds_output_sine(1000UL, dds_factor, 0UL);
 }
 
+static void Spectrum_SetLcrTestSignal(void)
+{
+  dds_output_sine(SPECTRUM_LCR_TEST_FREQ_HZ,
+                  dds_factor,
+                  Spectrum_DdsAmplitudeMvpp(SPECTRUM_LCR_TEST_AMP_CODE));
+}
+
 static void Spectrum_CommitInput(void)
 {
   uint8_t valid;
@@ -531,7 +538,7 @@ static void Spectrum_SendStatus(void)
 
 static void Spectrum_LoadDefaults(void)
 {
-  spectrum_snapshot.mode = 0U;
+  spectrum_snapshot.mode = SPECTRUM_MODE_SUM_WAVEFORM;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
   spectrum_snapshot.channel_id = 0U;
   spectrum_snapshot.wave_count = 2U;
@@ -612,9 +619,26 @@ void SpectrumSystem_OnKey(char key)
   }
   else if (key == 'B')
   {
-    spectrum_snapshot.apply_counter++;
     spectrum_snapshot.state = SPECTRUM_HOST_READY;
-    Spectrum_UpdateDdsSine();
+    if (spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST)
+    {
+      spectrum_snapshot.mode = SPECTRUM_MODE_SUM_WAVEFORM;
+      Spectrum_UpdateDdsSine();
+    }
+    else
+    {
+      spectrum_snapshot.mode = SPECTRUM_MODE_LCR_TEST;
+      Spectrum_SetLcrTestSignal();
+    }
+  }
+  else if ((spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST) && (key == 'D'))
+  {
+    Spectrum_SetLcrTestSignal();
+    spectrum_snapshot.apply_counter++;
+    spectrum_snapshot.state = SPECTRUM_HOST_SENT;
+  }
+  else if (spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST)
+  {
   }
   else if (key == '4')
   {
