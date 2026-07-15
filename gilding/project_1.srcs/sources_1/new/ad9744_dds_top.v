@@ -45,25 +45,33 @@ module ad9744_dds_top (
     wire [2:0]  cfg2_wave_sys;
     wire        cfg2_enable_sys;
     wire        uart_activity;
-    wire mix_cfg_toggle_sys;
-    wire mix_cfg_target_sys;
-    wire [7:0] mix_type_sys;
-    wire [127:0] mix_ftw_sys, mix_phase_sys;
-    wire [55:0] mix_amp_sys;
-    wire [63:0] mix_duty_sys;
-    wire signed [13:0] mix_offset_sys;
-    wire mix_cache_mode_sys;
-    wire [12:0] mix_cache_points_sys;
+    wire v2_frame_ok_toggle_sys;
+    wire mix0_cfg_toggle_sys, mix1_cfg_toggle_sys;
+    wire [7:0] mix0_type_sys, mix1_type_sys;
+    wire [127:0] mix0_ftw_sys, mix0_phase_sys;
+    wire [127:0] mix1_ftw_sys, mix1_phase_sys;
+    wire [55:0] mix0_amp_sys, mix1_amp_sys;
+    wire [63:0] mix0_duty_sys, mix1_duty_sys;
+    wire signed [13:0] mix0_offset_sys, mix1_offset_sys;
+    wire mix0_cache_mode_sys, mix1_cache_mode_sys;
+    wire [12:0] mix0_cache_points_sys, mix1_cache_points_sys;
+    wire mix0_enable_sys, mix1_enable_sys;
 
-    uart_multiwave_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_mix_uart (
+    uart_v2_dual_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_mix_uart (
         .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(mcu_uart_rxd),
         .uart_tx(mcu_uart_txd), .activity(uart_activity),
-        .cfg_toggle(mix_cfg_toggle_sys), .cfg_target(mix_cfg_target_sys),
-        .type_flat(mix_type_sys),
-        .ftw_flat(mix_ftw_sys), .phase_flat(mix_phase_sys),
-        .amp_flat(mix_amp_sys), .duty_flat(mix_duty_sys),
-        .dc_offset(mix_offset_sys), .cache_mode(mix_cache_mode_sys),
-        .cache_points(mix_cache_points_sys)
+        .frame_ok_toggle(v2_frame_ok_toggle_sys),
+        .cfg0_toggle(mix0_cfg_toggle_sys), .cfg1_toggle(mix1_cfg_toggle_sys),
+        .type0_flat(mix0_type_sys), .ftw0_flat(mix0_ftw_sys),
+        .phase0_flat(mix0_phase_sys), .amp0_flat(mix0_amp_sys),
+        .duty0_flat(mix0_duty_sys), .offset0(mix0_offset_sys),
+        .cache0_mode(mix0_cache_mode_sys), .cache0_points(mix0_cache_points_sys),
+        .enable0(mix0_enable_sys),
+        .type1_flat(mix1_type_sys), .ftw1_flat(mix1_ftw_sys),
+        .phase1_flat(mix1_phase_sys), .amp1_flat(mix1_amp_sys),
+        .duty1_flat(mix1_duty_sys), .offset1(mix1_offset_sys),
+        .cache1_mode(mix1_cache_mode_sys), .cache1_points(mix1_cache_points_sys),
+        .enable1(mix1_enable_sys)
     );
 
     // 保留旧单命令模块的默认寄存器，实际UART由多波形协议解析器统一接收。
@@ -81,39 +89,6 @@ module ad9744_dds_top (
         .wave_sel2(cfg2_wave_sys), .output_enable2(cfg2_enable_sys)
     );
 
-    // 对每个TARGET生成独立翻转握手。DAC1原有总线和流水保持不变；DAC2只取
-    // TARGET=1实时单槽帧中的槽位0，避免复制混合器和双BRAM影响现有时序。
-    reg mix_cfg_toggle_seen_sys;
-    reg dac1_mix_toggle_sys;
-    reg dac2_mix_toggle_sys;
-    always @(posedge sys_clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            mix_cfg_toggle_seen_sys <= 1'b0;
-            dac1_mix_toggle_sys <= 1'b0;
-            dac2_mix_toggle_sys <= 1'b0;
-        end else if (mix_cfg_toggle_sys != mix_cfg_toggle_seen_sys) begin
-            mix_cfg_toggle_seen_sys <= mix_cfg_toggle_sys;
-            if (!mix_cfg_target_sys)
-                dac1_mix_toggle_sys <= ~dac1_mix_toggle_sys;
-            else
-                dac2_mix_toggle_sys <= ~dac2_mix_toggle_sys;
-        end
-    end
-
-    wire [2:0] dac2_protocol_wave = {1'b0,mix_type_sys[1:0]};
-    wire dac2_protocol_enable = |mix_type_sys[1:0];
-
-    // 第二路 DAC 使用独立源文件；UART配置与板载KEY1本地切换同时保留。
-    ad9744_dds_ch2 u_dac2 (
-        .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
-        .key1_n(key1_n),
-        .cfg_toggle_sys(dac2_mix_toggle_sys), .cfg_ftw_sys(mix_ftw_sys[31:0]),
-        .cfg_phase_sys(mix_phase_sys[31:0]), .cfg_amplitude_sys(mix_amp_sys[13:0]),
-        .cfg_offset_sys(mix_offset_sys), .cfg_duty_sys(mix_duty_sys[15:0]),
-        .cfg_wave_sys(dac2_protocol_wave), .cfg_enable_sys(dac2_protocol_enable),
-        .dac_clk(dac2_clk), .dac_data(dac2_data), .dac_sleep(dac2_sleep)
-    );
-
     reg [1:0] reset_sync;
     always @(posedge sample_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) reset_sync <= 2'b00;
@@ -122,6 +97,7 @@ module ad9744_dds_top (
     assign sample_rst_n = reset_sync[1];
 
     (* ASYNC_REG = "TRUE" *) reg [2:0] mix_toggle_sync;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] mix1_toggle_sync;
     reg [7:0] mix_type;
     reg [127:0] mix_ftw, mix_phase;
     reg [55:0] mix_amp;
@@ -129,11 +105,23 @@ module ad9744_dds_top (
     reg signed [13:0] mix_offset;
     reg mix_cache_mode;
     reg [12:0] mix_cache_points;
+    reg mix_enable;
     reg mix_restart;
+    reg [7:0] mix1_type;
+    reg [127:0] mix1_ftw, mix1_phase;
+    reg [55:0] mix1_amp;
+    reg [63:0] mix1_duty;
+    reg signed [13:0] mix1_offset;
+    reg mix1_cache_mode;
+    reg [12:0] mix1_cache_points;
+    reg mix1_enable;
+    reg mix1_restart;
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
             mix_toggle_sync <= 3'b000;
+            mix1_toggle_sync <= 3'b000;
             mix_restart <= 1'b0;
+            mix1_restart <= 1'b0;
             // 上电诊断默认值：槽位0输出1 MHz满幅三角波，其余槽位关闭。
             mix_type <= 8'h02;
             mix_ftw <= {96'd0,32'd42_949_673};
@@ -143,17 +131,40 @@ module ad9744_dds_top (
             mix_offset <= 14'sd0;
             mix_cache_mode <= 1'b0;
             mix_cache_points <= 13'd0;
+            mix_enable <= 1'b1;
+            // DAC2上电诊断默认值：槽位0输出4 MHz半幅方波。
+            mix1_type <= 8'h01;
+            mix1_ftw <= {96'd0,32'd171_798_692};
+            mix1_phase <= 128'd0;
+            mix1_amp <= {42'd0,14'd4096};
+            mix1_duty <= {4{16'h8000}};
+            mix1_offset <= 14'sd0;
+            mix1_cache_mode <= 1'b0;
+            mix1_cache_points <= 13'd0;
+            mix1_enable <= 1'b1;
         end else begin
-            mix_toggle_sync <= {mix_toggle_sync[1:0],dac1_mix_toggle_sys};
+            mix_toggle_sync <= {mix_toggle_sync[1:0],mix0_cfg_toggle_sys};
+            mix1_toggle_sync <= {mix1_toggle_sync[1:0],mix1_cfg_toggle_sys};
             mix_restart <= 1'b0;
+            mix1_restart <= 1'b0;
             if (mix_toggle_sync[2] != mix_toggle_sync[1]) begin
-                mix_type <= mix_type_sys; mix_ftw <= mix_ftw_sys;
-                mix_phase <= mix_phase_sys; mix_amp <= mix_amp_sys;
-                mix_duty <= mix_duty_sys; mix_offset <= mix_offset_sys;
-                mix_cache_mode <= mix_cache_mode_sys;
-                mix_cache_points <= mix_cache_points_sys;
+                mix_type <= mix0_type_sys; mix_ftw <= mix0_ftw_sys;
+                mix_phase <= mix0_phase_sys; mix_amp <= mix0_amp_sys;
+                mix_duty <= mix0_duty_sys; mix_offset <= mix0_offset_sys;
+                mix_cache_mode <= mix0_cache_mode_sys;
+                mix_cache_points <= mix0_cache_points_sys;
+                mix_enable <= mix0_enable_sys;
                 // 新配置提交后四个槽位从共同零相位同步启动。
                 mix_restart <= 1'b1;
+            end
+            if (mix1_toggle_sync[2] != mix1_toggle_sync[1]) begin
+                mix1_type <= mix1_type_sys; mix1_ftw <= mix1_ftw_sys;
+                mix1_phase <= mix1_phase_sys; mix1_amp <= mix1_amp_sys;
+                mix1_duty <= mix1_duty_sys; mix1_offset <= mix1_offset_sys;
+                mix1_cache_mode <= mix1_cache_mode_sys;
+                mix1_cache_points <= mix1_cache_points_sys;
+                mix1_enable <= mix1_enable_sys;
+                mix1_restart <= 1'b1;
             end
         end
     end
@@ -175,6 +186,25 @@ module ad9744_dds_top (
         .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
         .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
         .cache_active(cache_active), .dac_data(cached_dac_data)
+    );
+
+    // DAC2复用与DAC1相同的四槽实时混合器和双Bank周期缓存。
+    wire [13:0] mixed_dac2_data;
+    ad9744_multiwave_mixer u_multiwave_mixer_dac2 (
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_restart),
+        .type_flat(mix1_type), .ftw_flat(mix1_ftw), .phase_flat(mix1_phase),
+        .amp_flat(mix1_amp), .duty_flat(mix1_duty), .dc_offset(mix1_offset),
+        .dac_data(mixed_dac2_data)
+    );
+
+    wire [13:0] cached_dac2_data;
+    wire cache2_active;
+    ad9744_period_cache u_period_cache_dac2 (
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_restart),
+        .enable_request(mix1_cache_mode), .period_points(mix1_cache_points),
+        .type_flat(mix1_type), .ftw_flat(mix1_ftw), .phase_flat(mix1_phase),
+        .amp_flat(mix1_amp), .duty_flat(mix1_duty), .dc_offset(mix1_offset),
+        .cache_active(cache2_active), .dac_data(cached_dac2_data)
     );
 
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。
@@ -262,11 +292,30 @@ module ad9744_dds_top (
     (* IOB = "TRUE" *) reg [13:0] dac_output_r;
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) dac_output_r <= 14'd0;
-        else               dac_output_r <= cache_active ? cached_dac_data : mixed_dac_data;
+        else               dac_output_r <= mix_enable
+                                             ? (cache_active ? cached_dac_data : mixed_dac_data)
+                                             : 14'd0;
     end
-    assign dac_clk   = forwarded_clk;
-    assign dac_data  = dac_output_r;
-    assign dac_sleep = 1'b0;
+    wire forwarded_clk2;
+    ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) u_dac2_clk_oddr (
+        .Q(forwarded_clk2), .C(sample_clk), .CE(1'b1),
+        .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
+    );
+
+    (* IOB = "TRUE" *) reg [13:0] dac2_output_r;
+    always @(posedge sample_clk or negedge sample_rst_n) begin
+        if (!sample_rst_n) dac2_output_r <= 14'd0;
+        else               dac2_output_r <= mix1_enable
+                                              ? (cache2_active ? cached_dac2_data : mixed_dac2_data)
+                                              : 14'd0;
+    end
+
+    assign dac_clk    = forwarded_clk;
+    assign dac_data   = dac_output_r;
+    assign dac_sleep  = ~mix_enable;
+    assign dac2_clk   = forwarded_clk2;
+    assign dac2_data  = dac2_output_r;
+    assign dac2_sleep = ~mix1_enable;
     // LED0/LED1均为低电平点亮，下面由诊断状态机驱动。
 
     // UART物理接收诊断：收到任意一个完整UART字节后，LED1永久以1 Hz闪烁。
@@ -274,7 +323,7 @@ module ad9744_dds_top (
     // 串口物理层之前，还是在新协议解析阶段。
     // 当前行为：仅完整配置帧成功提交后，LED1锁存为亮。
     reg uart_activity_d;
-    reg mix_cfg_toggle_d;
+    reg frame_ok_toggle_d;
     reg uart_seen;
     reg frame_ok_seen;
     reg [23:0] led1_divider;
@@ -284,7 +333,7 @@ module ad9744_dds_top (
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
             uart_activity_d <= 1'b0;
-            mix_cfg_toggle_d <= 1'b0;
+            frame_ok_toggle_d <= 1'b0;
             uart_seen <= 1'b0;
             frame_ok_seen <= 1'b0;
             led1_divider <= 24'd0;
@@ -293,13 +342,13 @@ module ad9744_dds_top (
             led0_r <= 1'b1;
         end else begin
             uart_activity_d <= uart_activity;
-            mix_cfg_toggle_d <= mix_cfg_toggle_sys;
+            frame_ok_toggle_d <= v2_frame_ok_toggle_sys;
 
             // 任意一个UART字节被接收器识别后，LED1开始持续闪烁。
             if (uart_activity != uart_activity_d)
                 uart_seen <= 1'b1;
             // 完整帧成功校验并提交（已处理结束帧）后，LED0开始持续闪烁。
-            if (mix_cfg_toggle_sys != mix_cfg_toggle_d)
+            if (v2_frame_ok_toggle_sys != frame_ok_toggle_d)
                 frame_ok_seen <= 1'b1;
 
             // LED1约2 Hz闪烁：每0.25秒翻转一次。
