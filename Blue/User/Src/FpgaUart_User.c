@@ -28,7 +28,13 @@
 #define FPGA_UART_RX_DMA_BUF_LEN     256U
 #define FPGA_UART_RX_DMA_BUF_ADDR    0x24070000UL
 #define FPGA_UART_SAMPLE_CLK_HZ      100000000ULL
+#define FPGA_UART_AD9910_CLK_HZ      1000000000ULL
+#define FPGA_UART_COHERENT_CLK_RATIO (FPGA_UART_AD9910_CLK_HZ / FPGA_UART_SAMPLE_CLK_HZ)
 #define FPGA_UART_RX_DMA_BUF         ((uint8_t *)FPGA_UART_RX_DMA_BUF_ADDR)
+
+#if ((FPGA_UART_AD9910_CLK_HZ % FPGA_UART_SAMPLE_CLK_HZ) != 0ULL)
+#error "AD9910 and FPGA clocks must have an integer coherent ratio"
+#endif
 
 typedef struct {
   uint8_t data[FPGA_UART_MAX_FRAME_LEN];
@@ -92,8 +98,12 @@ static void FpgaUart_WriteU32(uint8_t *data, uint8_t *pos, uint32_t value)
 
 static uint32_t FpgaUart_FrequencyToFtw(uint32_t frequency_hz)
 {
-  uint64_t scaled = ((uint64_t)frequency_hz << 32) + (FPGA_UART_SAMPLE_CLK_HZ / 2ULL);
-  return (uint32_t)(scaled / FPGA_UART_SAMPLE_CLK_HZ);
+  uint64_t ad9910_ftw = (((uint64_t)frequency_hz << 32) +
+                         (FPGA_UART_AD9910_CLK_HZ / 2ULL)) /
+                        FPGA_UART_AD9910_CLK_HZ;
+
+  /* Both clocks come from the same source: 1 GHz / 100 MHz = 10 exactly. */
+  return (uint32_t)(ad9910_ftw * FPGA_UART_COHERENT_CLK_RATIO);
 }
 
 static uint32_t FpgaUart_PhaseToWord(uint16_t phase_deg)

@@ -11,6 +11,105 @@ static uint8_t spectrum_source_apply_seen = 0xFFU;
 static uint16_t spectrum_source_transaction;
 extern float dds_factor;
 
+#define SPECTRUM_CHANNEL_COUNT 2U
+#define SPECTRUM_AMPLITUDE_CODE_MAX 8191U
+#define SPECTRUM_AMPLITUDE_PEAK_MAX_MV 3500UL
+#define SPECTRUM_OUTPUT_FULL_SCALE_UVPP 7000000ULL
+
+typedef struct {
+  uint8_t wave_count;
+  uint8_t selected_wave;
+  int16_t output_bias_mv;
+  uint8_t fpga_output_mode;
+  SpectrumWaveConfig waves[SPECTRUM_SUM_MAX_WAVES];
+} SpectrumChannelProfile;
+
+static SpectrumChannelProfile spectrum_channel_profiles[SPECTRUM_CHANNEL_COUNT];
+
+static uint16_t Spectrum_AmplitudeMvToCode(uint32_t amplitude_mv)
+{
+  if (amplitude_mv > SPECTRUM_AMPLITUDE_PEAK_MAX_MV)
+  {
+    amplitude_mv = SPECTRUM_AMPLITUDE_PEAK_MAX_MV;
+  }
+
+  return (uint16_t)(((uint64_t)amplitude_mv * SPECTRUM_AMPLITUDE_CODE_MAX) /
+                    SPECTRUM_AMPLITUDE_PEAK_MAX_MV);
+}
+
+static uint32_t Spectrum_AmplitudeCodeToUvpp(uint16_t amplitude_code)
+{
+  if (amplitude_code > SPECTRUM_AMPLITUDE_CODE_MAX)
+  {
+    amplitude_code = SPECTRUM_AMPLITUDE_CODE_MAX;
+  }
+
+  return (uint32_t)((((uint64_t)amplitude_code * SPECTRUM_OUTPUT_FULL_SCALE_UVPP) +
+                     (SPECTRUM_AMPLITUDE_CODE_MAX / 2U)) /
+                    SPECTRUM_AMPLITUDE_CODE_MAX);
+}
+
+static void Spectrum_SaveChannelProfile(uint8_t channel_id)
+{
+  SpectrumChannelProfile *profile;
+
+  if (channel_id >= SPECTRUM_CHANNEL_COUNT)
+  {
+    return;
+  }
+  profile = &spectrum_channel_profiles[channel_id];
+  profile->wave_count = spectrum_snapshot.wave_count;
+  profile->selected_wave = spectrum_snapshot.selected_wave;
+  profile->output_bias_mv = spectrum_snapshot.output_bias_mv;
+  profile->fpga_output_mode = spectrum_snapshot.fpga_output_mode;
+  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
+  {
+    profile->waves[i] = spectrum_snapshot.waves[i];
+  }
+}
+
+static void Spectrum_LoadChannelProfile(uint8_t channel_id)
+{
+  const SpectrumChannelProfile *profile;
+
+  if (channel_id >= SPECTRUM_CHANNEL_COUNT)
+  {
+    return;
+  }
+  profile = &spectrum_channel_profiles[channel_id];
+  spectrum_snapshot.channel_id = channel_id;
+  spectrum_snapshot.wave_count = profile->wave_count;
+  spectrum_snapshot.selected_wave = profile->selected_wave;
+  spectrum_snapshot.output_bias_mv = profile->output_bias_mv;
+  spectrum_snapshot.fpga_output_mode = profile->fpga_output_mode;
+  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
+  {
+    spectrum_snapshot.waves[i] = profile->waves[i];
+  }
+}
+
+static void Spectrum_InitChannelProfiles(void)
+{
+  for (uint8_t channel = 0U; channel < SPECTRUM_CHANNEL_COUNT; channel++)
+  {
+    SpectrumChannelProfile *profile = &spectrum_channel_profiles[channel];
+    profile->wave_count = 2U;
+    profile->selected_wave = 0U;
+    profile->output_bias_mv = 0;
+    profile->fpga_output_mode = 0U;
+    for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
+    {
+      profile->waves[i].frequency_hz = 1000000UL + ((uint32_t)i * 100000UL);
+      profile->waves[i].phase_deg = 0U;
+      profile->waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
+      profile->waves[i].offset_code = 0;
+      profile->waves[i].duty_code = 32768U;
+      profile->waves[i].waveform = (i < 2U) ? 1U : 0U;
+      profile->waves[i].enable = (i < 2U) ? 1U : 0U;
+    }
+  }
+}
+
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 {
   buf[(*pos)++] = (uint8_t)(value & 0xFFU);
@@ -51,14 +150,12 @@ static void Spectrum_SendSourceTransaction(void)
   for (uint8_t i = 0U; i < spectrum_snapshot.wave_count; i++)
   {
     const SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
-    uint32_t amplitude_scale = (spectrum_snapshot.channel_id == 0U) ? 10000UL : 1000UL;
     payload[pos++] = i;
     payload[pos++] = (uint8_t)(wave->waveform + 1U);
     Spectrum_WriteU16(payload, &pos, (wave->enable != 0U) ? 1U : 0U);
     Spectrum_WriteU32(payload, &pos, wave->frequency_hz * 100UL);
     Spectrum_WriteU32(payload, &pos, (uint32_t)((int32_t)wave->phase_deg * 1000));
-    Spectrum_WriteU32(payload, &pos,
-                      (((uint32_t)wave->amplitude_code * amplitude_scale + 4095UL) / 8191UL) * 1000UL);
+    Spectrum_WriteU32(payload, &pos, Spectrum_AmplitudeCodeToUvpp(wave->amplitude_code));
     Spectrum_WriteU32(payload, &pos,
                       (((uint32_t)wave->duty_code * 1000UL + 32767UL) / 65535UL) * 1000UL);
   }
@@ -424,9 +521,10 @@ static void Spectrum_UpdateDdsSine(void)
 
     if ((wave->enable != 0U) && (wave->waveform == 0U))
     {
-      dds_output_sine(wave->frequency_hz,
-                      dds_factor,
-                      Spectrum_DdsAmplitudeMvpp(wave->amplitude_code));
+      dds_output_sine_phase(wave->frequency_hz,
+                            dds_factor,
+                            Spectrum_DdsAmplitudeMvpp(wave->amplitude_code),
+                            wave->phase_deg);
       return;
     }
   }
@@ -478,8 +576,15 @@ static void Spectrum_CommitInput(void)
       }
       break;
     case 1U:
-      spectrum_snapshot.channel_id = (value != 0UL) ? 1U : 0U;
+    {
+      uint8_t new_channel = (value >= 2UL) ? 1U : 0U;
+      if (new_channel != spectrum_snapshot.channel_id)
+      {
+        Spectrum_SaveChannelProfile(spectrum_snapshot.channel_id);
+        Spectrum_LoadChannelProfile(new_channel);
+      }
       break;
+    }
     case 2U:
       if (value > 0UL) { value--; }
       Spectrum_SelectWave((uint8_t)value);
@@ -501,8 +606,11 @@ static void Spectrum_CommitInput(void)
       wave->phase_deg = Spectrum_NormalizePhaseDeg(signed_value);
       break;
     case 5U:
-      if (value > 8191UL) { value = 8191UL; }
-      wave->amplitude_code = (uint16_t)value;
+      if (value > SPECTRUM_AMPLITUDE_PEAK_MAX_MV)
+      {
+        value = SPECTRUM_AMPLITUDE_PEAK_MAX_MV;
+      }
+      wave->amplitude_code = Spectrum_AmplitudeMvToCode(value);
       break;
     case 6U:
       if (value > 8191UL) { value = 8191UL; }
@@ -554,6 +662,7 @@ static void Spectrum_CommitInput(void)
       break;
   }
 
+  Spectrum_SaveChannelProfile(spectrum_snapshot.channel_id);
   spectrum_snapshot.apply_counter++;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
   Spectrum_UpdateDdsSine();
@@ -593,26 +702,12 @@ static void Spectrum_LoadDefaults(void)
 {
   spectrum_snapshot.mode = SPECTRUM_MODE_SUM_WAVEFORM;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
-  spectrum_snapshot.channel_id = 0U;
-  spectrum_snapshot.wave_count = 2U;
-  spectrum_snapshot.selected_wave = 0U;
   spectrum_snapshot.ui_focus = 3U;
   spectrum_snapshot.ui_editing = 0U;
   spectrum_snapshot.apply_counter = 1U;
-  spectrum_snapshot.output_bias_mv = 0;
-  spectrum_snapshot.fpga_output_mode = 0U;
   Spectrum_ClearInput();
-
-  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
-  {
-    spectrum_snapshot.waves[i].frequency_hz = 1000000UL + ((uint32_t)i * 100000UL);
-    spectrum_snapshot.waves[i].phase_deg = 0U;
-    spectrum_snapshot.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
-    spectrum_snapshot.waves[i].offset_code = 0;
-    spectrum_snapshot.waves[i].duty_code = 32768U;
-    spectrum_snapshot.waves[i].waveform = (i < 2U) ? 1U : 0U;
-    spectrum_snapshot.waves[i].enable = (i < 2U) ? 1U : 0U;
-  }
+  Spectrum_InitChannelProfiles();
+  Spectrum_LoadChannelProfile(0U);
 }
 
 void SpectrumSystem_Init(void)

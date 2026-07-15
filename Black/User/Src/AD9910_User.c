@@ -17,6 +17,7 @@ float study_amp[2100];
  * @param hz     输出频率（Hz）
  * @param factor 幅值因子（0~1，预留，暂未使用）
  * @param mvpp   目标输出峰峰电压（mV）
+ * @param phase_deg 单频 Profile 相位（0~359°）
  *
  * 说明：
  *   - 幅度计算公式：Amp = max_asf * mvpp / FULL_SCALE_MVPP
@@ -25,7 +26,8 @@ float study_amp[2100];
  *   - 公式中的 3572.3 为原始参考值（对应约 5 倍后端放大的标准板），已按本板修正
  *   - ASF 为 14 位，占用寄存器 [13:0]，范围 0x0000~0x3FFF
  */
-void dds_output_sine(uint32_t hz, float factor, uint32_t mvpp)
+void dds_output_sine_phase(uint32_t hz, float factor, uint32_t mvpp,
+                           uint16_t phase_deg)
 {
     // 检查模式是否为正弦波，不是则初始化
     if (dds_mode != DDS_SINE)
@@ -43,10 +45,15 @@ void dds_output_sine(uint32_t hz, float factor, uint32_t mvpp)
     if (Amp > max_asf) Amp = max_asf;  // 防溢出，ASF 仅 14 位 [13:0]
 
     // 设置DDS信号输出
-    AD9910_Singal_Profile_Set_1(0, hz, Amp, 0);
+    AD9910_Singal_Profile_Set_1(0, hz, Amp, (uint16_t)(phase_deg % 360U));
 
     // 更新DDS寄存器
     AD9910_IUP();
+}
+
+void dds_output_sine(uint32_t hz, float factor, uint32_t mvpp)
+{
+    dds_output_sine_phase(hz, factor, mvpp, 0U);
 }
 
 

@@ -8,13 +8,13 @@
 
 V2 必须完整覆盖以下功能：
 
-- 电压输出与电流输出两个独立物理通道；
+- CH1 与 CH2 两个独立电压输出通道；
 - 两通道独立启停、配置、查询和同步切换；
 - 正弦波、方波、三角波、锯齿波；
 - 频率、幅值、相位、相位差、占空比和直流偏置；
 - 每通道最多 4 个波形分量叠加；
 - 实时 DDS 与周期缓存两种 FPGA 生成模式；
-- 电压通道 0～10 Vpp、电流通道 0～1 App 的物理量表达；
+- CH1、CH2 均为 0～7 Vpp（峰值 0～3500 mV）的物理量表达；
 - 0.01 Hz 频率步进、5°或更细相位步进、0.1%～99.9% 占空比；
 - L、C、R 单点测量、扫频、结果和错误回传；
 - 参数合法性检查、明确 ACK/NACK、超时重试和重复帧幂等处理；
@@ -24,9 +24,9 @@ V2 必须完整覆盖以下功能：
 
 | 题目功能 | V2 表达方式 |
 |---|---|
-| 电压/电流双路输出 | `channel_id=0/1`，提交时使用 `channel_mask` |
+| 双路电压输出 | `channel_id=0/1`，提交时使用 `channel_mask` |
 | 频率 | `frequency_cHz`，单位 0.01 Hz |
-| 幅值 | `amplitude_uunit_pp`，电压用 µVpp，电流用 µApp |
+| 幅值 | 界面使用峰值 mV；`amplitude_uunit_pp` 使用 µVpp |
 | 相位及相位差 | 每个分量独立 `phase_mdeg`，单位 0.001° |
 | 直流偏置 | 每个物理通道独立 `dc_offset_uunit` |
 | 波形 | `waveform` 枚举 SINE/SQUARE/TRIANGLE/SAW |
@@ -42,8 +42,8 @@ V2 必须完整覆盖以下功能：
 Black MCU  <--------- UART ---------->  Blue MCU  <--------- UART ---------->  FPGA
  node 0x01          V2物理量协议          node 0x02       V2数字码协议          node 0x10
                                                             |
-                                                            +--> DAC1：电压通道
-                                                            +--> DAC2：电流通道
+                                                            +--> DAC1：CH1 电压输出
+                                                            +--> DAC2：CH2 电压输出
 ```
 
 节点编号：
@@ -59,10 +59,16 @@ Black MCU  <--------- UART ---------->  Blue MCU  <--------- UART ---------->  F
 
 | `channel_id` | `channel_mask` | 物理意义 | FPGA 输出 |
 |---:|---:|---|---|
-| `0` | bit0 | 电压输出 | DAC1 |
-| `1` | bit1 | 电流输出 | DAC2 |
+| `0` | bit0 | CH1 电压输出 | DAC1 |
+| `1` | bit1 | CH2 电压输出 | DAC2 |
 
 两个通道共享 100 MHz DAC 采样时钟。只有共享采样时钟并使用同一次 `COMMIT`，跨通道相位差才有严格定义。
+
+当 AD9910 的 1 GHz 系统时钟与 FPGA 的 100 MHz 采样时钟由同一外部时钟派生时，Blue 必须先按 `ad9910_ftw = round(f * 2^32 / 1 GHz)` 计算 AD9910 基准频率字，再发送 `fpga_ftw = ad9910_ftw * 10`。两边独立取整会造成持续相位漂移。
+
+Black 必须分别保存 CH1、CH2 的通道配置。每套配置独立包含 4 个波形分量、分量数、
+当前分量、直流偏置和 REALTIME/CACHE 模式。切换 CH 只改变当前编辑与提交目标，
+不得把原通道配置复制或穿透到另一个 DAC，也不得清除未选通道的活动输出。
 
 ## 3. UART 与字节序
 
@@ -198,13 +204,13 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 | 偏移 | 类型 | 字段 | 说明 |
 |---:|---|---|---|
 | 0 | u16 | `transaction_id` | 本轮配置事务号 |
-| 2 | u8 | `channel_id` | 0=电压，1=电流 |
+| 2 | u8 | `channel_id` | 0=CH1，1=CH2 |
 | 3 | u8 | `output_enable` | 0=关闭，1=开启 |
 | 4 | u8 | `generation_mode` | 0=AUTO，1=REALTIME，2=CACHE |
 | 5 | u8 | `component_count` | 0～4 |
 | 6 | u8 | `range_mode` | 0=AUTO，其余为标定量程编号 |
 | 7 | u8 | `stage_flags` | bit0 允许限幅，bit1 要求严格相位同步 |
-| 8 | i32 | `dc_offset_uunit` | 电压通道 µV，电流通道 µA |
+| 8 | i32 | `dc_offset_uunit` | CH1、CH2 均使用 µV |
 | 12 | u16 | `cache_points` | 0=Blue 自动计算，或 16～4096 |
 | 14 | u16 | `settle_us` | 提交后建议稳定等待时间 |
 | 16 | u16 | `calibration_id` | 0=使用当前有效标定 |
@@ -218,7 +224,7 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 | 2 | u16 | `component_flags` | bit0 enable，其余保留 |
 | 4 | u32 | `frequency_cHz` | 0.01 Hz；最大约 42.94967295 MHz |
 | 8 | i32 | `phase_mdeg` | -180000～+180000，Blue 归一化到一周 |
-| 12 | u32 | `amplitude_uunit_pp` | µVpp 或 µApp |
+| 12 | u32 | `amplitude_uunit_pp` | CH1、CH2 均使用 µVpp，范围 0～7000000 |
 | 16 | u32 | `duty_ppm` | 1000～999000，仅方波使用 |
 
 波形枚举：
@@ -231,10 +237,19 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 | 3 | TRIANGLE |
 | 4 | SAW |
 
+幅值界面与数字码换算：
+
+- 屏幕 `AMP(mV)` 输入的是波形峰值，范围 0～3500 mV；对应单分量最大 7 Vpp。
+- Black 按 `amplitude_code=floor(AMP_mV*8191/3500)` 生成发给 FPGA 的幅值码。
+- Black→Blue 仍保持 `amplitude_uunit_pp` 的 µVpp 语义，按
+  `round(amplitude_code*7000000/8191)` 传输；Blue 必须直接使用 µVpp 反算，
+  不得先截断到整数 mV。
+- Blue→FPGA 的 `amplitude_code` 保持 0～8191，8191 对应单分量峰值 3500 mV。
+
 参数规则：
 
-- 电压通道所有交流分量叠加后的理论 Vpp 与偏置必须位于当前模拟量程内；目标基本范围为 0～10 Vpp。
-- 电流通道所有交流分量叠加后的理论 Ipp 与偏置必须位于当前模拟量程内；目标基本范围为 0～1 App。
+- CH1、CH2 所有交流分量叠加后的理论峰值与偏置必须位于±3500 mV 量程内；
+  超过时 FPGA 必须饱和并返回 `clipping` 状态。
 - 正弦波允许 0.01 Hz～20 MHz 以上，实际范围由能力响应和模拟带宽共同限制。
 - 方波、三角波、锯齿波允许 0.01 Hz～4 MHz 以上，实际范围由能力响应返回。
 - `AUTO` 模式下，无公共整数周期或高频配置选择 REALTIME；存在可靠公共周期且点数为 16～4096 时可选择 CACHE。
@@ -301,7 +316,7 @@ Blue 必须完成以下顺序：
 | 2 | u16 | `component_flags`，bit0 enable |
 | 4 | u32 | `ftw`，`round(f * 2^32 / Fs)` |
 | 8 | u32 | `phase_word`，`round(phase * 2^32 / 360°)` |
-| 12 | u16 | `amplitude_code`，0～8191 |
+| 12 | u16 | `amplitude_code`，0～8191；8191 对应单分量峰值 3500 mV |
 | 14 | u16 | `duty_code`，0～65535 |
 
 与现有 FPGA 实现相比必须完成的改动：
@@ -495,13 +510,13 @@ D3 91 02 02 01 02 01 01 00 04 00 78 56 34 12 48 D8 91 D3
 
 ### 14.2 Blue 暂存 DAC1 的 1 MHz 正弦
 
-事务号 `0x1234`，实时 DDS，单分量，FTW=`0x028F5C29`，相位 0，幅度码 8191：
+事务号 `0x1234`，实时 DDS，单分量，FTW=`0x028F5C26`，直接对应同源 1 MHz，相位 0，幅度码 8191：
 
 ```text
 D3 91 02 10 02 20 01 02 00 1A 00
 34 12 00 01 01 01 00 00 00 00
-00 01 01 00 29 5C 8F 02 00 00 00 00 FF 1F 00 80
-A5 EE 91 D3
+00 01 01 00 26 5C 8F 02 00 00 00 00 FF 1F 00 80
+46 FD 91 D3
 ```
 
 ### 14.3 原子提交 DAC1 与 DAC2
