@@ -306,10 +306,11 @@ endmodule
 // 新多波形帧：A5 5A TARGET CONTROL, COUNT个13字节条目, OFFSET_L/H,
 // 缓存模式再跟POINTS_L/H，最后XOR, 5A A5。CONTROL[7]选择缓存模式，
 // CONTROL[2:0]为COUNT。条目：TYPE, FTW(4), PHASE(4), AMP(2), DUTY(2)。
-// 当前只接受TARGET=0；TARGET=1为DAC2独立槽位预留。
+// TARGET=0支持DAC1实时/缓存0..4槽；TARGET=1支持DAC2实时0..1槽。
 module uart_multiwave_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     input wire clk, input wire rst_n, input wire uart_rx,
     output wire uart_tx, output reg activity, output reg cfg_toggle,
+    output reg cfg_target,
     output reg [7:0] type_flat, output reg [127:0] ftw_flat,
     output reg [127:0] phase_flat, output reg [55:0] amp_flat,
     output reg [63:0] duty_flat, output reg signed [13:0] dc_offset,
@@ -320,6 +321,7 @@ module uart_multiwave_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     wire rx_valid; wire [7:0] rx_byte; wire tx_busy;
     reg tx_start; reg [7:0] tx_byte;
     reg [2:0] state; reg [2:0] count;
+    reg target_pending;
     reg cache_mode_pending;
     reg [6:0] payload_index; reg [6:0] payload_length;
     reg [7:0] checksum; reg checksum_ok; reg [1:0] ack_index; reg ack_pending;
@@ -363,6 +365,7 @@ module uart_multiwave_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state<=S_A5; count<=0; payload_index<=0; payload_length<=0;
+            target_pending<=0; cfg_target<=0;
             cache_mode_pending<=0;
             checksum<=0; checksum_ok<=0; activity<=0; cfg_toggle<=0;
             // 与DAC采样域默认值保持一致：槽位0为1 MHz满幅三角波。
@@ -392,11 +395,16 @@ module uart_multiwave_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
                     end
                     S_TARGET: begin
                         checksum<=rx_byte;
-                        if (rx_byte==8'd0) state<=S_COUNT;
+                        if (rx_byte<=8'd1) begin
+                            target_pending<=rx_byte[0];
+                            state<=S_COUNT;
+                        end
                         else state<=S_A5;
                     end
                     S_COUNT: begin
-                        if ((rx_byte[6:3]==4'd0) && (rx_byte[2:0]<=4)) begin
+                        if ((rx_byte[6:3]==4'd0) && (rx_byte[2:0]<=4) &&
+                            (!target_pending ||
+                             (!rx_byte[7] && (rx_byte[2:0]<=1)))) begin
                             count<=rx_byte[2:0]; cache_mode_pending<=rx_byte[7];
                             checksum<=checksum^rx_byte;
                             payload_index<=0;
@@ -463,6 +471,7 @@ module uart_multiwave_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
                             endcase
                             cache_mode<=cache_mode_pending;
                             cache_points<=cache_mode_pending ? decoded_cache_points[12:0] : 13'd0;
+                            cfg_target<=target_pending;
                             cfg_toggle<=~cfg_toggle;
                             if (reply_armed) begin
                                 ack_status<=8'h00; ack_pending<=1; ack_index<=0;

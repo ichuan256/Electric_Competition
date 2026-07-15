@@ -28,6 +28,7 @@ module ad9744_dds_ch2 (
     reg key1_stable;
     reg [20:0] key1_debounce_count;
     reg key1_press;
+    wire cfg_update_pulse = cfg_toggle_sync[2] != cfg_toggle_sync[1];
 
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
@@ -42,7 +43,7 @@ module ad9744_dds_ch2 (
             output_enable <= 1'b1;
         end else begin
             cfg_toggle_sync <= {cfg_toggle_sync[1:0], cfg_toggle_sys};
-            if (cfg_toggle_sync[2] != cfg_toggle_sync[1]) begin
+            if (cfg_update_pulse) begin
                 ftw <= cfg_ftw_sys;
                 phase_offset <= cfg_phase_sys;
                 amplitude <= cfg_amplitude_sys;
@@ -94,10 +95,11 @@ module ad9744_dds_ch2 (
     wire signed [15:0] tri_up = -16'sd8192 + $signed({1'b0, phase[30:18], 1'b0});
     wire signed [15:0] tri_value = phase[31] ? -tri_up - 16'sd1 : tri_up;
     wire signed [14:0] square_value = (phase[31:16] < duty) ? 15'sd8191 : -15'sd8192;
-    // 4 MHz测试方波固定50%占空比并直接给出1/2满量程的14位补码，绕过
-    // DSP乘法、缩放和限幅链。+4096=0x1000，-4096=0x3000；两个码之间
-    // 只翻转符号位，可显著降低并行总线同步开关噪声。
-    wire [13:0] square_dac_code = phase[31] ? 14'h3000 : 14'h1000;
+    // 方波绕过DSP乘法、缩放和限幅链，直接按当前幅度生成对称补码。
+    // 默认幅度4096时为0x1000/-4096=0x3000，仅翻转符号位。
+    wire signed [14:0] square_level =
+        phase[31] ? -$signed({1'b0,amplitude}) : $signed({1'b0,amplitude});
+    wire [13:0] square_dac_code = square_level[13:0];
     wire signed [15:0] scaled_value = product >>> 13;
     wire signed [15:0] sum_value = scaled_value + dc_offset;
     wire signed [15:0] limited_value =
@@ -120,7 +122,7 @@ module ad9744_dds_ch2 (
             product <= 30'sd0;
             dac_data_r <= 14'd0;
         end else begin
-            if (key1_press) phase_acc <= 32'd0;
+            if (cfg_update_pulse || key1_press) phase_acc <= 32'd0;
             else            phase_acc <= phase_acc + ftw;
             product <= wave_raw * $signed({1'b0, amplitude});
             if (!output_enable)

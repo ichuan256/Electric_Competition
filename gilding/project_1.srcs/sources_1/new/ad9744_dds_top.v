@@ -46,6 +46,7 @@ module ad9744_dds_top (
     wire        cfg2_enable_sys;
     wire        uart_activity;
     wire mix_cfg_toggle_sys;
+    wire mix_cfg_target_sys;
     wire [7:0] mix_type_sys;
     wire [127:0] mix_ftw_sys, mix_phase_sys;
     wire [55:0] mix_amp_sys;
@@ -57,14 +58,15 @@ module ad9744_dds_top (
     uart_multiwave_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_mix_uart (
         .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(mcu_uart_rxd),
         .uart_tx(mcu_uart_txd), .activity(uart_activity),
-        .cfg_toggle(mix_cfg_toggle_sys), .type_flat(mix_type_sys),
+        .cfg_toggle(mix_cfg_toggle_sys), .cfg_target(mix_cfg_target_sys),
+        .type_flat(mix_type_sys),
         .ftw_flat(mix_ftw_sys), .phase_flat(mix_phase_sys),
         .amp_flat(mix_amp_sys), .duty_flat(mix_duty_sys),
         .dc_offset(mix_offset_sys), .cache_mode(mix_cache_mode_sys),
         .cache_points(mix_cache_points_sys)
     );
 
-    // DAC2暂时维持旧默认输出，不接收新协议；后续TARGET=1接入独立槽位。
+    // 保留旧单命令模块的默认寄存器，实际UART由多波形协议解析器统一接收。
     wire legacy_uart_unused, legacy_activity_unused;
     uart_config #(.CLK_HZ(50_000_000), .BAUD(115_200)) u_legacy_defaults (
         .clk(sys_clk), .rst_n(sys_rst_n), .uart_rx(1'b1),
@@ -79,14 +81,36 @@ module ad9744_dds_top (
         .wave_sel2(cfg2_wave_sys), .output_enable2(cfg2_enable_sys)
     );
 
-    // 第二路 DAC 使用独立源文件，便于单独维护和后续接入电压转电流模块。
+    // 对每个TARGET生成独立翻转握手。DAC1原有总线和流水保持不变；DAC2只取
+    // TARGET=1实时单槽帧中的槽位0，避免复制混合器和双BRAM影响现有时序。
+    reg mix_cfg_toggle_seen_sys;
+    reg dac1_mix_toggle_sys;
+    reg dac2_mix_toggle_sys;
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            mix_cfg_toggle_seen_sys <= 1'b0;
+            dac1_mix_toggle_sys <= 1'b0;
+            dac2_mix_toggle_sys <= 1'b0;
+        end else if (mix_cfg_toggle_sys != mix_cfg_toggle_seen_sys) begin
+            mix_cfg_toggle_seen_sys <= mix_cfg_toggle_sys;
+            if (!mix_cfg_target_sys)
+                dac1_mix_toggle_sys <= ~dac1_mix_toggle_sys;
+            else
+                dac2_mix_toggle_sys <= ~dac2_mix_toggle_sys;
+        end
+    end
+
+    wire [2:0] dac2_protocol_wave = {1'b0,mix_type_sys[1:0]};
+    wire dac2_protocol_enable = |mix_type_sys[1:0];
+
+    // 第二路 DAC 使用独立源文件；UART配置与板载KEY1本地切换同时保留。
     ad9744_dds_ch2 u_dac2 (
         .sample_clk(sample_clk), .sample_rst_n(sample_rst_n),
         .key1_n(key1_n),
-        .cfg_toggle_sys(cfg2_toggle_sys), .cfg_ftw_sys(cfg2_ftw_sys),
-        .cfg_phase_sys(cfg2_phase_sys), .cfg_amplitude_sys(cfg2_amplitude_sys),
-        .cfg_offset_sys(cfg2_offset_sys), .cfg_duty_sys(cfg2_duty_sys),
-        .cfg_wave_sys(cfg2_wave_sys), .cfg_enable_sys(cfg2_enable_sys),
+        .cfg_toggle_sys(dac2_mix_toggle_sys), .cfg_ftw_sys(mix_ftw_sys[31:0]),
+        .cfg_phase_sys(mix_phase_sys[31:0]), .cfg_amplitude_sys(mix_amp_sys[13:0]),
+        .cfg_offset_sys(mix_offset_sys), .cfg_duty_sys(mix_duty_sys[15:0]),
+        .cfg_wave_sys(dac2_protocol_wave), .cfg_enable_sys(dac2_protocol_enable),
         .dac_clk(dac2_clk), .dac_data(dac2_data), .dac_sleep(dac2_sleep)
     );
 
@@ -120,7 +144,7 @@ module ad9744_dds_top (
             mix_cache_mode <= 1'b0;
             mix_cache_points <= 13'd0;
         end else begin
-            mix_toggle_sync <= {mix_toggle_sync[1:0],mix_cfg_toggle_sys};
+            mix_toggle_sync <= {mix_toggle_sync[1:0],dac1_mix_toggle_sys};
             mix_restart <= 1'b0;
             if (mix_toggle_sync[2] != mix_toggle_sync[1]) begin
                 mix_type <= mix_type_sys; mix_ftw <= mix_ftw_sys;

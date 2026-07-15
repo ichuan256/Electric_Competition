@@ -12,8 +12,8 @@
 A5 5A TARGET CONTROL [ENTRY0 ... ENTRYn] OFFSET_L OFFSET_H [POINTS_L POINTS_H] XOR 5A A5
 ```
 
-- `TARGET=00`：DAC1，当前版本支持。
-- `TARGET=01`：DAC2，已经预留，当前版本不接收。
+- `TARGET=00`：DAC1，支持实时DDS 0..4槽和周期缓存0..4槽。
+- `TARGET=01`：DAC2，支持实时DDS 0..1槽；不支持缓存模式和多槽叠加。
 - `CONTROL[7]`：`0`为实时 DDS 叠加，`1`为单周期缓存循环输出。
 - `CONTROL[2:0]`：本帧连续包含的波形槽位数量，范围 `0..4`。
 - `CONTROL[6:3]`：保留，必须为 0。
@@ -241,8 +241,39 @@ FF 1F       AMP，8191
 
 ## 11. 当前硬件范围
 
-- UART多波形双模式控制当前只接入DAC1，即`TARGET=00`。
-- `TARGET=01`为DAC2协议槽位预留，当前FPGA不会按该帧控制DAC2。
-- DAC2当前作为独立硬件验证通道，由板载KEY1切换方波、三角波和锯齿波。
+- DAC1使用`TARGET=00`，支持实时DDS和周期缓存双模式，最多4个叠加槽位。
+- DAC2使用`TARGET=01`，只支持实时DDS，允许`COUNT=0`关闭或`COUNT=1`配置
+  单个波形；缓存模式或`COUNT>1`会被拒绝且不返回成功应答。
+- DAC2使用槽位0的FTW、PHASE、AMP、DUTY、TYPE和全局OFFSET。配置成功后
+  原子更新并从零相位重新启动。
+- 板载KEY1仍可在DAC2当前频率、幅度和偏置下切换方波、三角波和锯齿波。
 - DAC2默认输出为4 MHz、1/2满量程方波，用于降低满幅补码方波全部数据位同时
   翻转造成的同步开关噪声。
+
+## 12. DAC2实时单槽示例
+
+DAC2输出1 MHz、半幅锯齿波、零相位、零偏置：
+
+```text
+A5 5A 01 01 03 29 5C 8F 02 00 00 00 00 00 10 00 80 00 00 6B 5A A5
+```
+
+```text
+A5 5A       帧头
+01          TARGET，DAC2
+01          CONTROL，实时模式，1个槽位
+03          TYPE，锯齿波
+29 5C 8F 02 FTW，1 MHz @ 100 MHz
+00 00 00 00 PHASE，0度
+00 10       AMP，4096，约1/2数字满量程
+00 80       DUTY，50%，锯齿波忽略
+00 00       OFFSET，0
+6B          XOR
+5A A5       帧尾
+```
+
+接收成功后返回一次：
+
+```text
+5A C0 00 9A
+```
