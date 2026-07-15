@@ -7,7 +7,7 @@
 #define SPECTRUM_DISPLAY_LED_HEARTBEAT 0U
 #define SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN 8U
 #define SPECTRUM_DISPLAY_SUM_MAX_WAVES 4U
-#define SPECTRUM_DISPLAY_SUM_FIELD_COUNT 11U
+#define SPECTRUM_DISPLAY_SUM_FIELD_COUNT 12U
 
 #define SPECTRUM_DISPLAY_MODE_SUM_WAVEFORM 0U
 #define SPECTRUM_DISPLAY_MODE_LCR_TEST     1U
@@ -34,6 +34,7 @@ typedef struct {
   char ui_input[SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN + 1U];
   uint8_t apply_counter;
   int16_t output_bias_mv;
+  uint8_t fpga_output_mode;
   SpectrumDisplayWaveConfig waves[SPECTRUM_DISPLAY_SUM_MAX_WAVES];
   char last_key;
   uint8_t last_key_ascii;

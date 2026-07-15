@@ -20,7 +20,8 @@
 #define FPGA_UART_RX_DMA_BUF_ADDR   0x24070000UL
 #define FPGA_UART_SAMPLE_CLK_HZ     100000000ULL
 #define FPGA_UART_ENTRY_LEN         13U
-#define FPGA_UART_FRAME_MAX_LEN     (2U + 2U + (FPGA_UART_SUM_MAX_WAVES * FPGA_UART_ENTRY_LEN) + 2U + 1U + 2U)
+#define FPGA_UART_CONTROL_COUNT_MASK 0x07U
+#define FPGA_UART_FRAME_MAX_LEN     (2U + 2U + (FPGA_UART_SUM_MAX_WAVES * FPGA_UART_ENTRY_LEN) + 2U + 2U + 1U + 2U)
 #define FPGA_UART_RX_DMA_BUF        ((uint8_t *)FPGA_UART_RX_DMA_BUF_ADDR)
 
 static FpgaUartState fpga_uart_state;
@@ -243,29 +244,6 @@ static void FpgaUart_ClearFrame(void)
   fpga_uart_state.retry_count = 0U;
 }
 
-static void FpgaUart_LoadFrame(const uint8_t *frame, uint8_t frame_len)
-{
-  if ((frame == 0) || (frame_len == 0U) || (frame_len > FPGA_UART_FRAME_MAX_LEN))
-  {
-    return;
-  }
-
-  FpgaUart_ClearFrame();
-  for (uint8_t i = 0U; i < frame_len; i++)
-  {
-    fpga_uart_frame[i] = frame[i];
-  }
-  fpga_uart_frame_len = frame_len;
-  fpga_uart_frame_sent = 0U;
-  fpga_uart_state.dirty_mask = 1U;
-  fpga_uart_state.queue_count = 1U;
-  fpga_uart_state.queue_index = 0U;
-  fpga_uart_state.last_cmd = frame[2];
-  fpga_uart_state.last_data = frame_len;
-  fpga_uart_wait_kind = FPGA_UART_WAIT_DAC_ACK;
-  fpga_uart_ack_timeout_ms = FPGA_UART_ACK_TIMEOUT_MS;
-}
-
 static void FpgaUart_ReadAck(void)
 {
   uint8_t byte;
@@ -372,10 +350,12 @@ void FpgaUart_Task(void)
 
 void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
                            const FpgaUartWaveConfig *waves,
-                           int16_t offset_code)
+                           int16_t offset_code, uint8_t control_flags,
+                           uint16_t period_points)
 {
   uint8_t pos = 0U;
   uint8_t checksum_start;
+  uint8_t control;
   uint16_t safe_offset;
 
   if (waves == 0)
@@ -386,6 +366,8 @@ void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
   {
     wave_count = FPGA_UART_SUM_MAX_WAVES;
   }
+  control = (wave_count & FPGA_UART_CONTROL_COUNT_MASK) |
+            (control_flags & FPGA_UART_CONTROL_CACHE);
 
   FpgaUart_ClearFrame();
 
@@ -393,7 +375,7 @@ void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
   fpga_uart_frame[pos++] = FPGA_UART_FRAME_HEAD1;
   checksum_start = pos;
   fpga_uart_frame[pos++] = target;
-  fpga_uart_frame[pos++] = wave_count;
+  fpga_uart_frame[pos++] = control;
 
   for (uint8_t i = 0U; i < wave_count; i++)
   {
@@ -407,6 +389,10 @@ void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
 
   safe_offset = (uint16_t)offset_code;
   FpgaUart_PushU16(&pos, safe_offset);
+  if ((control & FPGA_UART_CONTROL_CACHE) != 0U)
+  {
+    FpgaUart_PushU16(&pos, period_points);
+  }
   fpga_uart_frame[pos] = FpgaUart_Checksum(&fpga_uart_frame[checksum_start],
                                            (uint8_t)(pos - checksum_start));
   pos++;
@@ -439,7 +425,8 @@ void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phas
   wave.waveform = waveform;
   wave.enable = output_enable;
 
-  FpgaUart_SetMultiwave(channel_id, 1U, &wave, offset_code);
+  FpgaUart_SetMultiwave(channel_id, 1U, &wave, offset_code,
+                        FPGA_UART_CONTROL_REALTIME, 0U);
 }
 
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
@@ -452,18 +439,8 @@ void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
     offset_code = waves[0].offset_code;
   }
 
-  FpgaUart_SetMultiwave(channel_id, wave_count, waves, offset_code);
-}
-
-void FpgaUart_SendTestFrame(void)
-{
-  static const uint8_t test_frame[] = {
-    0xA5U, 0x5AU, 0x00U, 0x01U, 0x01U, 0x29U, 0x5CU, 0x8FU,
-    0x02U, 0x00U, 0x00U, 0x00U, 0x00U, 0xFFU, 0x1FU, 0x00U,
-    0x80U, 0x00U, 0x00U, 0x98U, 0x5AU, 0xA5U
-  };
-
-  FpgaUart_LoadFrame(test_frame, (uint8_t)sizeof(test_frame));
+  FpgaUart_SetMultiwave(channel_id, wave_count, waves, offset_code,
+                        FPGA_UART_CONTROL_REALTIME, 0U);
 }
 
 FpgaUartState FpgaUart_GetState(void)

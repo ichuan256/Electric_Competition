@@ -26,6 +26,9 @@
 #define DISPLAY_LCR_ADC_FS_HZ     2500000UL
 #define DISPLAY_LCR_FFT_LEN       4096UL
 #define DISPLAY_LCR_SETTLE_US     1000UL
+#define DISPLAY_FPGA_SAMPLE_HZ    100000000UL
+#define DISPLAY_FPGA_POINTS_MIN   16UL
+#define DISPLAY_FPGA_POINTS_MAX   4096UL
 
 static SpectrumDisplayState display_state;
 static uint32_t display_last_rx_count = 0UL;
@@ -166,6 +169,7 @@ static const char *Spectrum_FieldName(uint8_t field)
     case 8U: return "WAVE";
     case 9U: return "EN";
     case 10U: return "BIAS";
+    case 11U: return "MODE";
     default: return "?";
   }
 }
@@ -231,6 +235,9 @@ static void Spectrum_FormatFieldValue(uint8_t field, char *text, uint8_t text_le
     case 10U:
       snprintf(text, text_len, "%dmV", display_state.output_bias_mv);
       break;
+    case 11U:
+      snprintf(text, text_len, "%s", display_state.fpga_output_mode ? "CACHE" : "DDS");
+      break;
     default:
       snprintf(text, text_len, "-");
       break;
@@ -263,6 +270,8 @@ static void Spectrum_FormatEditText(char *text, uint8_t text_len)
 static void Spectrum_SendSumToFpga(void)
 {
   FpgaUartWaveConfig waves[SPECTRUM_DISPLAY_SUM_MAX_WAVES];
+  uint32_t period_points = 0UL;
+  uint8_t control_flags = FPGA_UART_CONTROL_REALTIME;
   uint8_t i;
 
   for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
@@ -276,10 +285,30 @@ static void Spectrum_SendSumToFpga(void)
     waves[i].enable = display_state.waves[i].enable;
   }
 
+  if (display_state.fpga_output_mode != 0U)
+  {
+    control_flags = FPGA_UART_CONTROL_CACHE;
+    if (waves[0].frequency_hz != 0UL)
+    {
+      period_points = (DISPLAY_FPGA_SAMPLE_HZ + waves[0].frequency_hz / 2UL) /
+                      waves[0].frequency_hz;
+    }
+    if (period_points < DISPLAY_FPGA_POINTS_MIN)
+    {
+      period_points = DISPLAY_FPGA_POINTS_MIN;
+    }
+    else if (period_points > DISPLAY_FPGA_POINTS_MAX)
+    {
+      period_points = DISPLAY_FPGA_POINTS_MAX;
+    }
+  }
+
   FpgaUart_SetMultiwave(display_state.channel_id,
                         display_state.wave_count,
                         waves,
-                        display_state.output_bias_mv);
+                        display_state.output_bias_mv,
+                        control_flags,
+                        (uint16_t)period_points);
 }
 
 static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
@@ -352,6 +381,10 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
   {
     display_state.output_bias_mv = Spectrum_ReadI16(data, &pos);
   }
+  if (pos < len)
+  {
+    display_state.fpga_output_mode = (data[pos] != 0U) ? 1U : 0U;
+  }
 
   if (display_state.apply_counter != display_last_apply_counter)
   {
@@ -384,6 +417,7 @@ static void Spectrum_LoadDefaults(void)
   display_state.ui_focus = 3U;
   display_state.apply_counter = 1U;
   display_state.output_bias_mv = 0;
+  display_state.fpga_output_mode = 0U;
   display_state.last_key = '-';
   display_state.last_key_ascii = 0U;
   display_lcr_last_ftw = Spectrum_LcrDdsFtw(DISPLAY_LCR_FREQ_HZ);
@@ -501,7 +535,7 @@ static void Spectrum_DrawInfo(void)
 
   lcd_fill(0U, DISPLAY_INFO_Y, 479U, 319U, WHITE);
 
-  snprintf(line, sizeof(line), "SEL:%s W%u/%u FIELD:%s KEY:%c  RX:%lu ERR:%lu SZ:%u",
+  snprintf(line, sizeof(line), "S:%s W%u/%u F:%s K:%c RX:%lu E:%lu Z:%u",
            Spectrum_StateText(display_state.state),
            (uint16_t)display_state.selected_wave + 1U,
            display_state.wave_count,
@@ -512,7 +546,7 @@ static void Spectrum_DrawInfo(void)
            display_last_rx_size);
   lcd_show_string(8U, DISPLAY_INFO_Y, 464U, 16U, 16U, line, BLACK);
 
-  snprintf(line, sizeof(line), "FPGA CMD:%02X ACK:%02X/%u TX:%lu RX:%lu ERR:%lu Q:%u/%u W:%u R:%u",
+  snprintf(line, sizeof(line), "FPGA C:%02X A:%02X/%u T:%lu R:%lu E:%lu Q:%u/%u W:%u R:%u",
            fpga.last_cmd,
            fpga.last_ack_cmd,
            fpga.last_ack_status,
@@ -609,7 +643,7 @@ static void Spectrum_DrawScreen(void)
   lcd_fill(0U, 0U, 479U, 51U, WHITE);
   lcd_show_string(8U, 8U, 340U, 24U, 24U, "SUM WAVEFORM", RED);
   lcd_show_string(8U, 34U, 460U, 16U, 16U,
-                  "D edit/apply   4/2 left   6/8 right   * backspace   # point",
+                  "D edit  4/2 left  6/8 right  * del  # point",
                   GRAY);
   Spectrum_DrawFields();
   Spectrum_DrawTable();
@@ -638,7 +672,7 @@ void SpectrumDisplay_Task(void)
     display_state.last_key_ascii = (uint8_t)key;
     if ((key == 'C') && (display_state.ui_editing == 0U))
     {
-      FpgaUart_SendTestFrame();
+      Spectrum_SendSumToFpga();
     }
     display_info_refresh_requested = 1U;
   }

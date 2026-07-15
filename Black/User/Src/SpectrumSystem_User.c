@@ -299,7 +299,7 @@ static void Spectrum_MoveFocusHorizontal(int8_t step)
   else
   {
     first = 6U;
-    count = 5U;
+    count = 6U;
   }
 
   offset = (int8_t)(spectrum_snapshot.ui_focus - first);
@@ -499,6 +499,9 @@ static void Spectrum_CommitInput(void)
       }
       spectrum_snapshot.output_bias_mv = (int16_t)signed_value;
       break;
+    case 11U:
+      spectrum_snapshot.fpga_output_mode = (value != 0UL) ? 1U : 0U;
+      break;
     default:
       break;
   }
@@ -540,6 +543,7 @@ static void Spectrum_SendStatus(void)
     payload[pos++] = wave->enable;
   }
   Spectrum_WriteI16(payload, &pos, spectrum_snapshot.output_bias_mv);
+  payload[pos++] = spectrum_snapshot.fpga_output_mode;
 
   (void)BoardComm_Send(BOARD_COMM_CMD_SYS_STATUS, payload, pos);
 }
@@ -555,6 +559,7 @@ static void Spectrum_LoadDefaults(void)
   spectrum_snapshot.ui_editing = 0U;
   spectrum_snapshot.apply_counter = 1U;
   spectrum_snapshot.output_bias_mv = 0;
+  spectrum_snapshot.fpga_output_mode = 0U;
   Spectrum_ClearInput();
 
   for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
