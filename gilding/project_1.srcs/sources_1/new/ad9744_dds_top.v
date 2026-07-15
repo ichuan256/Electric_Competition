@@ -14,15 +14,18 @@ module ad9744_dds_top (
     output wire        dac2_clk,
     output wire [13:0] dac2_data,
     output wire        dac2_sleep,
+    output wire        ad9910_ref_clk_25m,
     output wire        led0,
     output wire        led1
 );
     wire sample_clk;
+    wire ref_clk_25m;
     wire clk_locked;
     wire sample_rst_n;
 
     ad9744_clocking u_clocking (
         .clk_out1(sample_clk),
+        .clk_out4(ref_clk_25m),
         .resetn(sys_rst_n),
         .locked(clk_locked),
         .clk_in1(sys_clk)
@@ -302,6 +305,14 @@ module ad9744_dds_top (
         .D1(1'b0), .D2(1'b1), .R(1'b0), .S(1'b0)
     );
 
+    // 与DAC采样时钟同源的25 MHz参考时钟。使用Clocking Wizard的专用输出
+    // 和ODDR转发到管脚，避免用普通逻辑分频带来的占空比及布线抖动。
+    wire forwarded_ref_clk_25m;
+    ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) u_ad9910_ref_clk_oddr (
+        .Q(forwarded_ref_clk_25m), .C(ref_clk_25m), .CE(clk_locked),
+        .D1(1'b1), .D2(1'b0), .R(1'b0), .S(1'b0)
+    );
+
     (* IOB = "TRUE" *) reg [13:0] dac2_output_r;
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) dac2_output_r <= 14'd0;
@@ -316,6 +327,7 @@ module ad9744_dds_top (
     assign dac2_clk   = forwarded_clk2;
     assign dac2_data  = dac2_output_r;
     assign dac2_sleep = ~mix1_enable;
+    assign ad9910_ref_clk_25m = forwarded_ref_clk_25m;
     // LED0/LED1均为低电平点亮，下面由诊断状态机驱动。
 
     // UART物理接收诊断：收到任意一个完整UART字节后，LED1永久以1 Hz闪烁。
@@ -409,25 +421,30 @@ module ad9744_clocking (
     input  wire clk_in1,
     input  wire resetn,
     output wire clk_out1,
+    output wire clk_out4,
     output wire locked
 );
 `ifdef SYNTHESIS
     clk_wiz_0 u_clk_wiz (
         .clk_out1(clk_out1),
+        .clk_out4(clk_out4),
         .reset(~resetn),
         .locked(locked),
         .clk_in1(clk_in1)
     );
 `else
     reg sim_clk;
+    reg sim_clk25;
     reg sim_locked;
 
     initial begin
         sim_clk    = 1'b0;
+        sim_clk25  = 1'b0;
         sim_locked = 1'b0;
     end
 
     always #5 sim_clk = resetn ? ~sim_clk : 1'b0;
+    always #20 sim_clk25 = resetn ? ~sim_clk25 : 1'b0;
 
     initial begin
         wait (resetn === 1'b1);
@@ -438,6 +455,7 @@ module ad9744_clocking (
     end
 
     assign clk_out1 = sim_clk;
+    assign clk_out4 = sim_clk25;
     assign locked   = sim_locked;
 `endif
 endmodule

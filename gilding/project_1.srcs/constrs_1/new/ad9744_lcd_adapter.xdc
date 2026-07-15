@@ -22,6 +22,12 @@ set_property -dict {PACKAGE_PIN K14 IOSTANDARD LVCMOS33} [get_ports mcu_uart_rxd
 set_property -dict {PACKAGE_PIN M15 IOSTANDARD LVCMOS33} [get_ports mcu_uart_txd]
 set_property PULLUP true [get_ports mcu_uart_rxd]
 
+# AD9910模块25 MHz参考时钟：T20原为RGB LCD场同步信号LCD_VS，当前功能未占用。
+# 管脚仍输出3.3 V LVCMOS；连接AD9910模块前必须使用外部衰减/交流耦合网络。
+set_property -dict {PACKAGE_PIN T20 IOSTANDARD LVCMOS33} [get_ports ad9910_ref_clk_25m]
+set_property DRIVE 12 [get_ports ad9910_ref_clk_25m]
+set_property SLEW FAST [get_ports ad9910_ref_clk_25m]
+
 # AD9744 控制信号
 set_property -dict {PACKAGE_PIN Y17 IOSTANDARD LVCMOS33} [get_ports dac_sleep] ;# AD9744 PD/SLEEP
 set_property -dict {PACKAGE_PIN Y16 IOSTANDARD LVCMOS33} [get_ports dac_clk]   ;# AD9744 CLK
