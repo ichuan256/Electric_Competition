@@ -3,3 +3,41 @@ Refrences/
 References/
 references/
 tmp/
+
+# Vivado local state and generated output
+**/.Xil/
+**/*.cache/
+**/*.gen/
+**/*.runs/
+**/*.sim/
+**/*.hw/
+**/*.ip_user_files/
+**/ip_*.gen/
+
+# Vivado simulator and tool logs
+xsim.dir/
+*.wdb
+*.wdf
+*.jou
+*.log
+*.pb
+*.str
+*.dmp
+*.dcp
+dfx_runtime.txt
+
+# Generated reports and webtalk files
+*.rpt
+webtalk*.xml
+webtalk*.html
+
+# Keep IP configuration sources; generated IP products remain ignored above.
+!**/*.xci
+
+# Retired FPGA-side ADC/FFT experiments; FFT now runs on the MCU
+Gilding/ad9226_fft_uart_test/
+Gilding/ad9266_fft_test/
+
+# Unused legacy second Clock Wizard; current DAC top does not instantiate it
+Gilding/project_1.srcs/sources_1/ip/clk_wiz_1/
+tmp/
