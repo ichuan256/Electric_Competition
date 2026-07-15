@@ -1,0 +1,5 @@
+the_ROM_image:
+{
+    [bootloader] zynq_fsbl.elf
+    ad9744_dds_top.bit
+}

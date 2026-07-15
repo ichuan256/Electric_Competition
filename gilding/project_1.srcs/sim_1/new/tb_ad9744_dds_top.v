@@ -25,6 +25,10 @@ module tb_ad9744_dds_top;
     integer dac2_high_samples;
     integer dac2_low_samples;
     reg ack_seen;
+    reg [7:0] tx_payload [0:79];
+    integer tx_payload_len;
+    reg cfg0_toggle_before;
+    reg cfg1_toggle_before;
 
     ad9744_dds_top dut (
         .sys_clk(sys_clk),
@@ -57,6 +61,48 @@ module tb_ad9744_dds_top;
         end
     endtask
 
+    function [15:0] crc16_next;
+        input [15:0] crc_in;
+        input [7:0] data_in;
+        integer k;
+        reg [15:0] c;
+        begin
+            c = crc_in ^ {data_in,8'h00};
+            for (k=0;k<8;k=k+1)
+                c = c[15] ? ((c << 1) ^ 16'h1021) : (c << 1);
+            crc16_next = c;
+        end
+    endfunction
+
+    task uart_send_v2;
+        input [7:0] command;
+        input [15:0] sequence;
+        input corrupt_crc;
+        integer n;
+        reg [15:0] crc;
+        reg [7:0] b;
+        begin
+            uart_send_byte(8'hD3); uart_send_byte(8'h91);
+            crc=16'hFFFF;
+            b=8'h02; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=8'h10; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=8'h02; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=command; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=8'h01; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=sequence[7:0]; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=sequence[15:8]; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=tx_payload_len[7:0]; uart_send_byte(b); crc=crc16_next(crc,b);
+            b=8'h00; uart_send_byte(b); crc=crc16_next(crc,b);
+            for (n=0;n<tx_payload_len;n=n+1) begin
+                uart_send_byte(tx_payload[n]);
+                crc=crc16_next(crc,tx_payload[n]);
+            end
+            if (corrupt_crc) crc=crc^16'h0001;
+            uart_send_byte(crc[7:0]); uart_send_byte(crc[15:8]);
+            uart_send_byte(8'h91); uart_send_byte(8'hD3);
+        end
+    endtask
+
     initial begin
         sys_clk = 1'b0;
         forever #10 sys_clk = ~sys_clk;
@@ -74,7 +120,7 @@ module tb_ad9744_dds_top;
 
     always @(posedge dac2_clk) begin
         if (dac2_check_enable) begin
-            if (dac2_data == 14'h1000)
+            if ((dac2_data == 14'h1000) || (dac2_data == 14'h0FFF))
                 dac2_high_samples = dac2_high_samples + 1;
             else if (dac2_data == 14'h3000)
                 dac2_low_samples = dac2_low_samples + 1;
@@ -119,58 +165,84 @@ module tb_ad9744_dds_top;
         if ((dac2_high_samples == 0) || (dac2_low_samples == 0))
             $fatal(1, "DAC2默认方波没有完成高低电平切换");
 
-        // TARGET=1，实时单槽：DAC2改为1 MHz、半幅锯齿波；DAC1必须保持默认。
         dac2_check_enable = 1'b0;
-        uart_send_byte(8'hA5); uart_send_byte(8'h5A);
-        uart_send_byte(8'h01); uart_send_byte(8'h01); uart_send_byte(8'h03);
-        uart_send_byte(8'h29); uart_send_byte(8'h5C);
-        uart_send_byte(8'h8F); uart_send_byte(8'h02);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'h00); uart_send_byte(8'h10);
-        uart_send_byte(8'h00); uart_send_byte(8'h80);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'h6B); uart_send_byte(8'h5A); uart_send_byte(8'hA5);
-        #50000;
 
-        if (dut.u_dac2.ftw !== 32'd42_949_673)
-            $fatal(1, "TARGET=1未更新DAC2频率");
-        if (dut.u_dac2.wave_sel !== 3'd3)
-            $fatal(1, "TARGET=1未更新DAC2波形");
-        if (dut.u_dac2.amplitude !== 14'd4096)
-            $fatal(1, "TARGET=1未更新DAC2幅度");
-        if ((dut.mix_type !== 8'h02) ||
-            (dut.mix_ftw[31:0] !== 32'd42_949_673))
-            $fatal(1, "TARGET=1错误修改了DAC1配置");
-        if (!ack_seen)
-            $fatal(1, "TARGET=1正确帧未产生UART应答");
+        // V2 CHANNEL_STAGE：暂存DAC2的1 MHz半幅锯齿波，尚不得影响活动输出。
+        tx_payload_len=26;
+        tx_payload[0]=8'h34; tx_payload[1]=8'h12; tx_payload[2]=8'h01;
+        tx_payload[3]=8'h01; tx_payload[4]=8'h01; tx_payload[5]=8'h03;
+        tx_payload[6]=0; tx_payload[7]=0; tx_payload[8]=0; tx_payload[9]=0;
+        tx_payload[10]=0; tx_payload[11]=8'h04; tx_payload[12]=1; tx_payload[13]=0;
+        tx_payload[14]=8'h29; tx_payload[15]=8'h5C; tx_payload[16]=8'h8F; tx_payload[17]=8'h02;
+        tx_payload[18]=0; tx_payload[19]=0; tx_payload[20]=0; tx_payload[21]=0;
+        tx_payload[22]=0; tx_payload[23]=8'h10; tx_payload[24]=0; tx_payload[25]=8'h80;
+        uart_send_v2(8'h20,16'h0002,1'b0);
+        #2500000;
+        if ((dut.mix1_type!==8'h01)||(dut.mix1_ftw[31:0]!==32'd171_798_692))
+            $fatal(1,"CHANNEL_STAGE提前改变了DAC2活动配置");
+        if ((dut.u_mix_uart.response_status!==8'h00)||(dut.u_mix_uart.response_request_cmd!==8'h20))
+            $fatal(1,"DAC2 CHANNEL_STAGE没有返回V2 OK应答");
 
-        // TARGET=0回归：DAC1改为1 MHz满幅锯齿波；DAC2配置必须保持不变。
-        ack_seen = 1'b0;
-        uart_send_byte(8'hA5); uart_send_byte(8'h5A);
-        uart_send_byte(8'h00); uart_send_byte(8'h01); uart_send_byte(8'h03);
-        uart_send_byte(8'h29); uart_send_byte(8'h5C);
-        uart_send_byte(8'h8F); uart_send_byte(8'h02);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'hFF); uart_send_byte(8'h1F);
-        uart_send_byte(8'h00); uart_send_byte(8'h80);
-        uart_send_byte(8'h00); uart_send_byte(8'h00);
-        uart_send_byte(8'h9A); uart_send_byte(8'h5A); uart_send_byte(8'hA5);
-        #50000;
+        // V2 COMMIT：只有此帧成功后DAC2才切换。
+        tx_payload_len=4; tx_payload[0]=8'h34; tx_payload[1]=8'h12;
+        tx_payload[2]=8'h02; tx_payload[3]=8'h09;
+        uart_send_v2(8'h21,16'h0003,1'b0);
+        #2500000;
+        if ((dut.mix1_type[1:0]!==2'd3)||(dut.mix1_ftw[31:0]!==32'd42_949_673)||
+            (dut.mix1_amp[13:0]!==14'd4096))
+            $fatal(1,"DAC2 COMMIT没有应用1 MHz半幅锯齿波");
+        if ((dut.mix_type!==8'h02)||(dut.mix_ftw[31:0]!==32'd42_949_673))
+            $fatal(1,"DAC2事务错误修改了DAC1");
+        if ((dut.u_mix_uart.response_status!==8'h00)||(dut.u_mix_uart.response_mask!==16'h0002))
+            $fatal(1,"DAC2 COMMIT应答的applied_mask错误");
 
-        if ((dut.mix_type !== 8'h03) ||
-            (dut.mix_ftw[31:0] !== 32'd42_949_673) ||
-            (dut.mix_amp[13:0] !== 14'd8191))
-            $fatal(1, "TARGET=0未保持原有DAC1配置路径");
-        if ((dut.u_dac2.ftw !== 32'd42_949_673) ||
-            (dut.u_dac2.wave_sel !== 3'd3) ||
-            (dut.u_dac2.amplitude !== 14'd4096))
-            $fatal(1, "TARGET=0错误修改了DAC2配置");
-        if (!ack_seen)
-            $fatal(1, "TARGET=0正确帧未产生UART应答");
+        // 同一事务分别暂存两路，再用mask=3原子提交。
+        tx_payload_len=26;
+        tx_payload[0]=8'h22; tx_payload[1]=8'h22; tx_payload[2]=8'h00;
+        tx_payload[3]=8'h01; tx_payload[4]=8'h01; tx_payload[5]=8'h03;
+        tx_payload[6]=0; tx_payload[7]=0; tx_payload[8]=0; tx_payload[9]=0;
+        tx_payload[10]=0; tx_payload[11]=8'h02; tx_payload[12]=1; tx_payload[13]=0;
+        tx_payload[14]=8'h29; tx_payload[15]=8'h5C; tx_payload[16]=8'h8F; tx_payload[17]=8'h02;
+        tx_payload[18]=0; tx_payload[19]=0; tx_payload[20]=0; tx_payload[21]=0;
+        tx_payload[22]=0; tx_payload[23]=8'h08; tx_payload[24]=0; tx_payload[25]=8'h80;
+        uart_send_v2(8'h20,16'h0004,1'b0); #2500000;
 
-        $display("仿真通过：DAC_CLK=%0.3f MHz，TARGET=0/1路由隔离且均返回应答",
+        tx_payload[2]=8'h01; tx_payload[11]=8'h03;
+        tx_payload[14]=8'h52; tx_payload[15]=8'hB8; tx_payload[16]=8'h1E; tx_payload[17]=8'h05;
+        uart_send_v2(8'h20,16'h0005,1'b0); #2500000;
+
+        tx_payload_len=4; tx_payload[0]=8'h22; tx_payload[1]=8'h22;
+        tx_payload[2]=8'h03; tx_payload[3]=8'h0B;
+        uart_send_v2(8'h21,16'h0006,1'b0); #2500000;
+        if ((dut.mix_type[1:0]!==2'd1)||(dut.mix1_type[1:0]!==2'd2))
+            $fatal(1,"双通道COMMIT波形路由错误");
+        if ((dut.mix_ftw[31:0]!==32'd42_949_673)||
+            (dut.mix1_ftw[31:0]!==32'd85_899_346))
+            $fatal(1,"双通道COMMIT频率配置错误");
+        if (dut.u_mix_uart.response_mask!==16'h0003)
+            $fatal(1,"双通道COMMIT没有返回applied_mask=3");
+
+        // ACK丢失时Blue会用同一SEQ重发；重复COMMIT只能重发响应，不能再次切相位。
+        cfg0_toggle_before=dut.u_mix_uart.cfg0_toggle;
+        cfg1_toggle_before=dut.u_mix_uart.cfg1_toggle;
+        uart_send_v2(8'h21,16'h0006,1'b0); #2500000;
+        if ((dut.u_mix_uart.cfg0_toggle!==cfg0_toggle_before)||
+            (dut.u_mix_uart.cfg1_toggle!==cfg1_toggle_before))
+            $fatal(1,"重复SRC+SEQ+CMD导致COMMIT被再次执行");
+        if (dut.u_mix_uart.response_status!==8'h00)
+            $fatal(1,"重复COMMIT没有重发缓存ACK");
+
+        // CRC错误不得改变活动配置，并必须返回BAD_CRC。
+        tx_payload_len=4; tx_payload[0]=8'h22; tx_payload[1]=8'h22;
+        tx_payload[2]=8'h03; tx_payload[3]=8'h0B;
+        uart_send_v2(8'h21,16'h0007,1'b1); #2500000;
+        if (dut.u_mix_uart.response_status!==8'h03)
+            $fatal(1,"CRC错误没有返回BAD_CRC");
+        if ((dut.mix_type[1:0]!==2'd1)||(dut.mix1_type[1:0]!==2'd2))
+            $fatal(1,"CRC错误帧改变了活动输出");
+        if (!ack_seen) $fatal(1,"V2请求没有产生UART响应");
+
+        $display("仿真通过：V2暂存/提交、双DAC原子切换、CRC保护与ACK均正确，DAC_CLK=%0.3f MHz",
                  1000.0/dac_period);
         $finish;
     end
