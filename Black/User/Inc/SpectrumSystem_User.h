@@ -5,7 +5,7 @@
 
 #define SPECTRUM_UI_INPUT_MAX_LEN 8U
 #define SPECTRUM_SUM_MAX_WAVES    4U
-#define SPECTRUM_SUM_FIELD_COUNT  11U
+#define SPECTRUM_SUM_FIELD_COUNT  12U
 
 #define SPECTRUM_MODE_SUM_WAVEFORM 0U
 #define SPECTRUM_MODE_LCR_TEST     1U
@@ -42,6 +42,7 @@ typedef struct {
   char ui_input[SPECTRUM_UI_INPUT_MAX_LEN + 1U];
   uint8_t apply_counter;
   int16_t output_bias_mv;
+  uint8_t fpga_output_mode;
   SpectrumWaveConfig waves[SPECTRUM_SUM_MAX_WAVES];
 } SpectrumHostSnapshot;
 
