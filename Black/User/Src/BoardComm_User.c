@@ -6,6 +6,8 @@
  * 默认绑定 USART3，也就是 CubeMX 生成的 huart3。
  */
 static UART_HandleTypeDef *board_comm_uart = &huart3;
+static uint16_t board_comm_tx_seq = 1U;
+static uint8_t board_comm_tx_buf[BOARD_COMM_RX_BUF_SIZE];
 
 /*
  * USART3 空闲中断接收缓冲区。
@@ -46,16 +48,21 @@ typedef struct {
  * 这种异或校验计算简单，方便用串口助手手工验证。若后续通信环境干扰较强，
  * 可以把这里升级为 CRC8 或 CRC16，但收发双方必须同时修改。
  */
-static uint8_t BoardComm_Checksum(uint8_t cmd, const uint8_t *data, uint8_t len)
+static uint16_t BoardComm_Crc16(const uint8_t *data, uint16_t len)
 {
-  uint8_t checksum = cmd ^ len;
+  uint16_t crc = 0xFFFFU;
 
-  for (uint8_t i = 0; i < len; i++)
+  for (uint16_t i = 0U; i < len; i++)
   {
-    checksum ^= data[i];
+    crc ^= (uint16_t)data[i] << 8;
+    for (uint8_t bit = 0U; bit < 8U; bit++)
+    {
+      crc = ((crc & 0x8000U) != 0U) ?
+            (uint16_t)((crc << 1) ^ 0x1021U) : (uint16_t)(crc << 1);
+    }
   }
 
-  return checksum;
+  return crc;
 }
 
 /*
@@ -79,7 +86,8 @@ static uint8_t BoardComm_Checksum(uint8_t cmd, const uint8_t *data, uint8_t len)
 static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size,
                                              uint8_t *cmd, const uint8_t **data, uint8_t *len)
 {
-  uint8_t checksum;
+  uint16_t payload_len;
+  uint16_t received_crc;
 
   if ((frame == 0) || (cmd == 0) || (data == 0) || (len == 0))
   {
@@ -87,7 +95,7 @@ static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size
   }
 
   /* 最短帧为：A5 5A CMD LEN CHECKSUM，共 5 字节。 */
-  if (size < 5U)
+  if (size < BOARD_COMM_FRAME_OVERHEAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
@@ -99,26 +107,42 @@ static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size
   }
 
   /* LEN 不能超过协议允许的最大数据区长度。 */
-  if (frame[3] > BOARD_COMM_MAX_PAYLOAD)
+  if (frame[2] != BOARD_COMM_VERSION)
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if ((frame[3] != BOARD_COMM_NODE_BLACK) &&
+      (frame[3] != BOARD_COMM_NODE_BROADCAST))
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if ((frame[6] & 0xC0U) != 0U)
+  {
+    return BOARD_COMM_ERROR;
+  }
+
+  payload_len = (uint16_t)frame[9] | ((uint16_t)frame[10] << 8);
+  if (payload_len > BOARD_COMM_MAX_PAYLOAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
-
-  /*
-   * 本协议要求一次空闲中断收到的字节数刚好等于 LEN + 5。
-   * 如果不相等，通常说明出现了半包、粘包或对方协议格式不一致。
-   */
-  if (size != ((uint16_t)frame[3] + 5U))
+  if (size != (uint16_t)(payload_len + BOARD_COMM_FRAME_OVERHEAD))
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
+  if ((frame[13U + payload_len] != BOARD_COMM_TAIL1) ||
+      (frame[14U + payload_len] != BOARD_COMM_TAIL2))
+  {
+    return BOARD_COMM_ERROR;
+  }
 
-  *cmd = frame[2];
-  *len = frame[3];
-  *data = &frame[4];
+  *cmd = frame[5];
+  *len = (uint8_t)payload_len;
+  *data = &frame[11];
 
-  checksum = BoardComm_Checksum(*cmd, *data, *len);
-  if (checksum != frame[4U + *len])
+  received_crc = (uint16_t)frame[11U + payload_len] |
+                 ((uint16_t)frame[12U + payload_len] << 8);
+  if (received_crc != BoardComm_Crc16(&frame[2], (uint16_t)(9U + payload_len)))
   {
     return BOARD_COMM_CHECKSUM_ERROR;
   }
@@ -134,16 +158,16 @@ static BoardComm_FrameProbeResult BoardComm_ProbeStandardFrame(const uint8_t *da
   {
     return BOARD_COMM_FRAME_NO_MATCH;
   }
-  if (available < 4U)
+  if (available < 11U)
   {
     return BOARD_COMM_FRAME_INCOMPLETE;
   }
-  if (data[3] > BOARD_COMM_MAX_PAYLOAD)
+  if (data[10] != 0U || data[9] > BOARD_COMM_MAX_PAYLOAD)
   {
     return BOARD_COMM_FRAME_INVALID;
   }
 
-  *frame_size = (uint16_t)data[3] + 5U;
+  *frame_size = (uint16_t)data[9] + BOARD_COMM_FRAME_OVERHEAD;
   return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
 }
 
@@ -199,6 +223,7 @@ static const BoardComm_FrameDecoder board_comm_frame_decoders[] = {
 void BoardComm_Init(void)
 {
   board_comm_uart = &huart3;
+  board_comm_tx_seq = 1U;
 }
 
 /*
@@ -346,7 +371,15 @@ __weak void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t 
  */
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
 {
-  uint8_t frame[BOARD_COMM_RX_BUF_SIZE];
+  uint16_t seq = board_comm_tx_seq++;
+  return BoardComm_SendV2(BOARD_COMM_NODE_BLUE, cmd, 0U, seq, data, len);
+}
+
+BoardComm_Status BoardComm_SendV2(uint8_t dst, uint8_t cmd, uint8_t flags,
+                                  uint16_t seq, const uint8_t *data, uint8_t len)
+{
+  uint16_t crc;
+  uint16_t frame_len;
 
   if (len > BOARD_COMM_MAX_PAYLOAD)
   {
@@ -358,19 +391,32 @@ BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
     return BOARD_COMM_ERROR;
   }
 
-  frame[0] = BOARD_COMM_HEAD1;
-  frame[1] = BOARD_COMM_HEAD2;
-  frame[2] = cmd;
-  frame[3] = len;
+  board_comm_tx_buf[0] = BOARD_COMM_HEAD1;
+  board_comm_tx_buf[1] = BOARD_COMM_HEAD2;
+  board_comm_tx_buf[2] = BOARD_COMM_VERSION;
+  board_comm_tx_buf[3] = dst;
+  board_comm_tx_buf[4] = BOARD_COMM_NODE_BLACK;
+  board_comm_tx_buf[5] = cmd;
+  board_comm_tx_buf[6] = flags & 0x3FU;
+  board_comm_tx_buf[7] = (uint8_t)(seq & 0xFFU);
+  board_comm_tx_buf[8] = (uint8_t)(seq >> 8);
+  board_comm_tx_buf[9] = len;
+  board_comm_tx_buf[10] = 0U;
 
   for (uint8_t i = 0; i < len; i++)
   {
-    frame[4 + i] = data[i];
+    board_comm_tx_buf[11U + i] = data[i];
   }
 
-  frame[4 + len] = BoardComm_Checksum(cmd, data, len);
+  crc = BoardComm_Crc16(&board_comm_tx_buf[2], (uint16_t)(9U + len));
+  board_comm_tx_buf[11U + len] = (uint8_t)(crc & 0xFFU);
+  board_comm_tx_buf[12U + len] = (uint8_t)(crc >> 8);
+  board_comm_tx_buf[13U + len] = BOARD_COMM_TAIL1;
+  board_comm_tx_buf[14U + len] = BOARD_COMM_TAIL2;
+  frame_len = (uint16_t)(len + BOARD_COMM_FRAME_OVERHEAD);
 
-  if (HAL_UART_Transmit(board_comm_uart, frame, (uint16_t)(len + 5U), BOARD_COMM_TIMEOUT_MS) != HAL_OK)
+  if (HAL_UART_Transmit(board_comm_uart, board_comm_tx_buf, frame_len,
+                        BOARD_COMM_TIMEOUT_MS) != HAL_OK)
   {
     return BOARD_COMM_TIMEOUT;
   }
@@ -386,8 +432,10 @@ BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
  */
 BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, uint32_t timeout)
 {
-  uint8_t header[4];
-  uint8_t checksum;
+  uint8_t header[11];
+  uint8_t trailer[4];
+  uint16_t payload_len;
+  uint16_t crc;
 
   if ((cmd == 0) || (data == 0) || (len == 0))
   {
@@ -399,18 +447,22 @@ BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, ui
     return BOARD_COMM_TIMEOUT;
   }
 
-  if ((header[0] != BOARD_COMM_HEAD1) || (header[1] != BOARD_COMM_HEAD2))
+  if ((header[0] != BOARD_COMM_HEAD1) || (header[1] != BOARD_COMM_HEAD2) ||
+      (header[2] != BOARD_COMM_VERSION) ||
+      ((header[3] != BOARD_COMM_NODE_BLACK) &&
+       (header[3] != BOARD_COMM_NODE_BROADCAST)))
   {
     return BOARD_COMM_ERROR;
   }
 
-  if (header[3] > BOARD_COMM_MAX_PAYLOAD)
+  payload_len = (uint16_t)header[9] | ((uint16_t)header[10] << 8);
+  if (payload_len > BOARD_COMM_MAX_PAYLOAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
 
-  *cmd = header[2];
-  *len = header[3];
+  *cmd = header[5];
+  *len = (uint8_t)payload_len;
 
   if (*len != 0U)
   {
@@ -420,12 +472,24 @@ BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, ui
     }
   }
 
-  if (HAL_UART_Receive(board_comm_uart, &checksum, 1, timeout) != HAL_OK)
+  if (HAL_UART_Receive(board_comm_uart, trailer, sizeof(trailer), timeout) != HAL_OK)
   {
     return BOARD_COMM_TIMEOUT;
   }
 
-  if (checksum != BoardComm_Checksum(*cmd, data, *len))
+  for (uint8_t i = 0U; i < 9U; i++)
+  {
+    board_comm_tx_buf[i] = header[i + 2U];
+  }
+  for (uint8_t i = 0U; i < *len; i++)
+  {
+    board_comm_tx_buf[9U + i] = data[i];
+  }
+  crc = BoardComm_Crc16(board_comm_tx_buf, (uint16_t)(9U + *len));
+  if ((trailer[0] != (uint8_t)(crc & 0xFFU)) ||
+      (trailer[1] != (uint8_t)(crc >> 8)) ||
+      (trailer[2] != BOARD_COMM_TAIL1) ||
+      (trailer[3] != BOARD_COMM_TAIL2))
   {
     return BOARD_COMM_CHECKSUM_ERROR;
   }
@@ -452,5 +516,14 @@ BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t 
 
 BoardComm_Status BoardComm_Ping(void)
 {
-  return BoardComm_Send(0x01, 0, 0);
+  uint32_t cookie = HAL_GetTick();
+  uint8_t payload[4];
+  uint16_t seq = board_comm_tx_seq++;
+
+  payload[0] = (uint8_t)(cookie & 0xFFUL);
+  payload[1] = (uint8_t)((cookie >> 8) & 0xFFUL);
+  payload[2] = (uint8_t)((cookie >> 16) & 0xFFUL);
+  payload[3] = (uint8_t)((cookie >> 24) & 0xFFUL);
+  return BoardComm_SendV2(BOARD_COMM_NODE_BLUE, BOARD_COMM_CMD_PING,
+                          BOARD_COMM_FLAG_ACK_REQ, seq, payload, sizeof(payload));
 }

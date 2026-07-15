@@ -1,9 +1,16 @@
 #include "BoardComm_User.h"
+#include "SpectrumDisplay_User.h"
 #include "AdcFftProtocol_User.h"
 #include "LogDetector_User.h"
 
 static UART_HandleTypeDef *board_comm_uart = &huart1;
 static uint8_t board_comm_rx_buf[BOARD_COMM_RX_BUF_SIZE];
+static uint8_t board_comm_tx_buf[BOARD_COMM_TX_BUF_SIZE];
+static uint16_t board_comm_tx_seq = 1U;
+static uint8_t board_comm_parsed_src;
+static uint8_t board_comm_parsed_dst;
+static uint8_t board_comm_parsed_flags;
+static uint16_t board_comm_parsed_seq;
 
 #define BOARD_COMM_QUEUE_DEPTH 8U
 #define BOARD_COMM_ADC_FFT_HEADER_LEN     9U
@@ -30,6 +37,10 @@ typedef struct {
 typedef struct {
   uint8_t cmd;
   uint8_t len;
+  uint8_t src;
+  uint8_t dst;
+  uint8_t flags;
+  uint16_t seq;
   BoardComm_Status status;
   uint8_t data[BOARD_COMM_MAX_PAYLOAD];
 } BoardComm_QueuedFrame;
@@ -40,6 +51,10 @@ static volatile uint8_t board_comm_queue_tail = 0;
 static volatile uint8_t board_comm_queue_count = 0;
 static volatile uint8_t board_comm_last_cmd = 0;
 static volatile uint8_t board_comm_last_len = 0;
+static volatile uint8_t board_comm_last_src = 0;
+static volatile uint8_t board_comm_last_dst = 0;
+static volatile uint8_t board_comm_last_flags = 0;
+static volatile uint16_t board_comm_last_seq = 0;
 static volatile BoardComm_Status board_comm_last_status = BOARD_COMM_OK;
 static uint8_t board_comm_last_data[BOARD_COMM_MAX_PAYLOAD];
 static volatile uint32_t board_comm_rx_count = 0;
@@ -49,16 +64,21 @@ static volatile uint32_t board_comm_uart_error_code = 0;
 static volatile uint8_t board_comm_key_pending = 0;
 static volatile char board_comm_key_value = 0;
 
-static uint8_t BoardComm_Checksum(uint8_t cmd, const uint8_t *data, uint8_t len)
+static uint16_t BoardComm_Crc16(const uint8_t *data, uint16_t len)
 {
-  uint8_t checksum = cmd ^ len;
+  uint16_t crc = 0xFFFFU;
 
-  for (uint8_t i = 0; i < len; i++)
+  for (uint16_t i = 0U; i < len; i++)
   {
-    checksum ^= data[i];
+    crc ^= (uint16_t)data[i] << 8;
+    for (uint8_t bit = 0U; bit < 8U; bit++)
+    {
+      crc = ((crc & 0x8000U) != 0U) ?
+            (uint16_t)((crc << 1) ^ 0x1021U) : (uint16_t)(crc << 1);
+    }
   }
 
-  return checksum;
+  return crc;
 }
 
 static uint16_t BoardComm_ReadU16(const uint8_t *buf, uint8_t *pos)
@@ -78,14 +98,15 @@ static void BoardComm_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size,
                                              uint8_t *cmd, const uint8_t **data, uint8_t *len)
 {
-  uint8_t checksum;
+  uint16_t payload_len;
+  uint16_t received_crc;
 
   if ((frame == 0) || (cmd == 0) || (data == 0) || (len == 0))
   {
     return BOARD_COMM_ERROR;
   }
 
-  if (size < 5U)
+  if (size < BOARD_COMM_FRAME_OVERHEAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
@@ -95,22 +116,46 @@ static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size
     return BOARD_COMM_ERROR;
   }
 
-  if (frame[3] > BOARD_COMM_MAX_PAYLOAD)
+  if (frame[2] != BOARD_COMM_VERSION)
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if ((frame[3] != BOARD_COMM_NODE_BLUE) &&
+      (frame[3] != BOARD_COMM_NODE_BROADCAST))
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if ((frame[6] & 0xC0U) != 0U)
+  {
+    return BOARD_COMM_ERROR;
+  }
+
+  payload_len = (uint16_t)frame[9] | ((uint16_t)frame[10] << 8);
+  if (payload_len > BOARD_COMM_MAX_PAYLOAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
-
-  if (size != ((uint16_t)frame[3] + 5U))
+  if (size != (uint16_t)(payload_len + BOARD_COMM_FRAME_OVERHEAD))
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
+  if ((frame[13U + payload_len] != BOARD_COMM_TAIL1) ||
+      (frame[14U + payload_len] != BOARD_COMM_TAIL2))
+  {
+    return BOARD_COMM_ERROR;
+  }
 
-  *cmd = frame[2];
-  *len = frame[3];
-  *data = &frame[4];
+  *cmd = frame[5];
+  *len = (uint8_t)payload_len;
+  *data = &frame[11];
+  board_comm_parsed_dst = frame[3];
+  board_comm_parsed_src = frame[4];
+  board_comm_parsed_flags = frame[6];
+  board_comm_parsed_seq = (uint16_t)frame[7] | ((uint16_t)frame[8] << 8);
 
-  checksum = BoardComm_Checksum(*cmd, *data, *len);
-  if (checksum != frame[4U + *len])
+  received_crc = (uint16_t)frame[11U + payload_len] |
+                 ((uint16_t)frame[12U + payload_len] << 8);
+  if (received_crc != BoardComm_Crc16(&frame[2], (uint16_t)(9U + payload_len)))
   {
     return BOARD_COMM_CHECKSUM_ERROR;
   }
@@ -142,6 +187,10 @@ static void BoardComm_StoreRxFrame(uint8_t cmd, const uint8_t *data, uint8_t len
     {
       board_comm_last_cmd = cmd;
       board_comm_last_len = len;
+      board_comm_last_src = board_comm_parsed_src;
+      board_comm_last_dst = board_comm_parsed_dst;
+      board_comm_last_flags = board_comm_parsed_flags;
+      board_comm_last_seq = board_comm_parsed_seq;
       board_comm_last_status = status;
       for (uint8_t i = 0; i < len; i++)
       {
@@ -169,6 +218,10 @@ static void BoardComm_StoreRxFrame(uint8_t cmd, const uint8_t *data, uint8_t len
   queue_index = board_comm_queue_head;
   board_comm_queue[queue_index].cmd = cmd;
   board_comm_queue[queue_index].len = len;
+  board_comm_queue[queue_index].src = board_comm_parsed_src;
+  board_comm_queue[queue_index].dst = board_comm_parsed_dst;
+  board_comm_queue[queue_index].flags = board_comm_parsed_flags;
+  board_comm_queue[queue_index].seq = board_comm_parsed_seq;
   board_comm_queue[queue_index].status = status;
   for (uint8_t i = 0; i < len; i++)
   {
@@ -186,16 +239,16 @@ static BoardComm_FrameProbeResult BoardComm_ProbeStandardFrame(const uint8_t *da
   {
     return BOARD_COMM_FRAME_NO_MATCH;
   }
-  if (available < 4U)
+  if (available < 11U)
   {
     return BOARD_COMM_FRAME_INCOMPLETE;
   }
-  if (data[3] > BOARD_COMM_MAX_PAYLOAD)
+  if (data[10] != 0U || data[9] > BOARD_COMM_MAX_PAYLOAD)
   {
     return BOARD_COMM_FRAME_INVALID;
   }
 
-  *frame_size = (uint16_t)data[3] + 5U;
+  *frame_size = (uint16_t)data[9] + BOARD_COMM_FRAME_OVERHEAD;
   return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
 }
 
@@ -251,6 +304,15 @@ void BoardComm_Init(void)
   board_comm_queue_count = 0U;
   board_comm_last_cmd = 0U;
   board_comm_last_len = 0U;
+  board_comm_last_src = 0U;
+  board_comm_last_dst = 0U;
+  board_comm_last_flags = 0U;
+  board_comm_last_seq = 0U;
+  board_comm_tx_seq = 1U;
+  board_comm_parsed_src = 0U;
+  board_comm_parsed_dst = 0U;
+  board_comm_parsed_flags = 0U;
+  board_comm_parsed_seq = 0U;
   board_comm_last_status = BOARD_COMM_OK;
   board_comm_rx_count = 0;
   board_comm_error_count = 0;
@@ -363,6 +425,9 @@ void BoardComm_ProcessTask(void)
 {
   uint8_t cmd;
   uint8_t len;
+  uint8_t src;
+  uint8_t flags;
+  uint16_t seq;
   uint8_t data_copy[BOARD_COMM_MAX_PAYLOAD];
   BoardComm_Status status;
   uint8_t error_payload[2];
@@ -375,6 +440,9 @@ void BoardComm_ProcessTask(void)
   __disable_irq();
   cmd = board_comm_queue[board_comm_queue_tail].cmd;
   len = board_comm_queue[board_comm_queue_tail].len;
+  src = board_comm_queue[board_comm_queue_tail].src;
+  flags = board_comm_queue[board_comm_queue_tail].flags;
+  seq = board_comm_queue[board_comm_queue_tail].seq;
   status = board_comm_queue[board_comm_queue_tail].status;
   for (uint8_t i = 0; i < len; i++)
   {
@@ -386,12 +454,12 @@ void BoardComm_ProcessTask(void)
 
   if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_PING))
   {
-    static const uint8_t pong[] = { 'P', 'O', 'N', 'G' };
-    (void)BoardComm_Send(BOARD_COMM_CMD_PONG, pong, (uint8_t)sizeof(pong));
+    (void)BoardComm_SendV2(src, BOARD_COMM_CMD_PING,
+                           BOARD_COMM_FLAG_RESPONSE, seq, data_copy, len);
   }
   else if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_KEYPAD))
   {
-    /* MergeBlack sends keypad events as CMD=0x10, LEN=1, DATA[0]=ASCII key. */
+    /* KEY_EVENT is already captured by BoardComm_StoreRxFrame(). */
   }
   else if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_ADC_SAMPLE_REQ))
   {
@@ -412,7 +480,29 @@ void BoardComm_ProcessTask(void)
     BoardComm_WriteU16(response, &resp_pos, (uint16_t)sample.dbm_x10);
     response[resp_pos++] = sample.valid;
 
-    (void)BoardComm_Send(BOARD_COMM_CMD_ADC_SAMPLE_RESP, response, resp_pos);
+    (void)BoardComm_SendV2(src, BOARD_COMM_CMD_ADC_SAMPLE_RESP,
+                           BOARD_COMM_FLAG_RESPONSE, seq, response, resp_pos);
+  }
+  else if ((status == BOARD_COMM_OK) &&
+           ((cmd == BOARD_COMM_CMD_SOURCE_STAGE) ||
+            (cmd == BOARD_COMM_CMD_SOURCE_COMMIT)))
+  {
+    uint8_t ack[8];
+    uint8_t ack_pos = 0U;
+    uint16_t transaction_id = 0U;
+    uint16_t applied_mask = 0U;
+    uint8_t protocol_status = SpectrumDisplay_HandleSourceFrame(cmd, data_copy, len,
+                                                                 &transaction_id,
+                                                                 &applied_mask);
+    ack[ack_pos++] = cmd;
+    ack[ack_pos++] = protocol_status;
+    BoardComm_WriteU16(ack, &ack_pos, 0U);
+    BoardComm_WriteU16(ack, &ack_pos, transaction_id);
+    BoardComm_WriteU16(ack, &ack_pos, applied_mask);
+    (void)BoardComm_SendV2(src, BOARD_COMM_CMD_ACK,
+                           (uint8_t)(BOARD_COMM_FLAG_RESPONSE |
+                                     ((protocol_status != 0U) ? BOARD_COMM_FLAG_ERROR : 0U)),
+                           seq, ack, ack_pos);
   }
   else if ((status == BOARD_COMM_OK) &&
            ((cmd == BOARD_COMM_CMD_SYS_STATUS) ||
@@ -429,11 +519,20 @@ void BoardComm_ProcessTask(void)
   }
 
   (void)len;
+  (void)flags;
 }
 
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
 {
-  uint8_t frame[BOARD_COMM_TX_BUF_SIZE];
+  uint16_t seq = board_comm_tx_seq++;
+  return BoardComm_SendV2(BOARD_COMM_NODE_BLACK, cmd, 0U, seq, data, len);
+}
+
+BoardComm_Status BoardComm_SendV2(uint8_t dst, uint8_t cmd, uint8_t flags,
+                                  uint16_t seq, const uint8_t *data, uint8_t len)
+{
+  uint16_t crc;
+  uint16_t frame_len;
 
   if (len > BOARD_COMM_MAX_PAYLOAD)
   {
@@ -445,19 +544,32 @@ BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
     return BOARD_COMM_ERROR;
   }
 
-  frame[0] = BOARD_COMM_HEAD1;
-  frame[1] = BOARD_COMM_HEAD2;
-  frame[2] = cmd;
-  frame[3] = len;
+  board_comm_tx_buf[0] = BOARD_COMM_HEAD1;
+  board_comm_tx_buf[1] = BOARD_COMM_HEAD2;
+  board_comm_tx_buf[2] = BOARD_COMM_VERSION;
+  board_comm_tx_buf[3] = dst;
+  board_comm_tx_buf[4] = BOARD_COMM_NODE_BLUE;
+  board_comm_tx_buf[5] = cmd;
+  board_comm_tx_buf[6] = flags & 0x3FU;
+  board_comm_tx_buf[7] = (uint8_t)(seq & 0xFFU);
+  board_comm_tx_buf[8] = (uint8_t)(seq >> 8);
+  board_comm_tx_buf[9] = len;
+  board_comm_tx_buf[10] = 0U;
 
   for (uint8_t i = 0; i < len; i++)
   {
-    frame[4 + i] = data[i];
+    board_comm_tx_buf[11U + i] = data[i];
   }
 
-  frame[4 + len] = BoardComm_Checksum(cmd, data, len);
+  crc = BoardComm_Crc16(&board_comm_tx_buf[2], (uint16_t)(9U + len));
+  board_comm_tx_buf[11U + len] = (uint8_t)(crc & 0xFFU);
+  board_comm_tx_buf[12U + len] = (uint8_t)(crc >> 8);
+  board_comm_tx_buf[13U + len] = BOARD_COMM_TAIL1;
+  board_comm_tx_buf[14U + len] = BOARD_COMM_TAIL2;
+  frame_len = (uint16_t)(len + BOARD_COMM_FRAME_OVERHEAD);
 
-  if (HAL_UART_Transmit(board_comm_uart, frame, (uint16_t)(len + 5U), BOARD_COMM_TIMEOUT_MS) != HAL_OK)
+  if (HAL_UART_Transmit(board_comm_uart, board_comm_tx_buf, frame_len,
+                        BOARD_COMM_TIMEOUT_MS) != HAL_OK)
   {
     return BOARD_COMM_TIMEOUT;
   }
@@ -480,7 +592,16 @@ BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t 
 
 BoardComm_Status BoardComm_Ping(void)
 {
-  return BoardComm_Send(BOARD_COMM_CMD_PING, 0, 0);
+  uint32_t cookie = HAL_GetTick();
+  uint8_t payload[4];
+  uint16_t seq = board_comm_tx_seq++;
+
+  payload[0] = (uint8_t)(cookie & 0xFFUL);
+  payload[1] = (uint8_t)((cookie >> 8) & 0xFFUL);
+  payload[2] = (uint8_t)((cookie >> 16) & 0xFFUL);
+  payload[3] = (uint8_t)((cookie >> 24) & 0xFFUL);
+  return BoardComm_SendV2(BOARD_COMM_NODE_BLACK, BOARD_COMM_CMD_PING,
+                          BOARD_COMM_FLAG_ACK_REQ, seq, payload, sizeof(payload));
 }
 
 BoardComm_State BoardComm_GetState(void)
@@ -490,6 +611,10 @@ BoardComm_State BoardComm_GetState(void)
   __disable_irq();
   state.last_cmd = board_comm_last_cmd;
   state.last_len = board_comm_last_len;
+  state.last_src = board_comm_last_src;
+  state.last_dst = board_comm_last_dst;
+  state.last_flags = board_comm_last_flags;
+  state.last_seq = board_comm_last_seq;
   for (uint8_t i = 0; i < BOARD_COMM_MAX_PAYLOAD; i++)
   {
     state.last_data[i] = board_comm_last_data[i];

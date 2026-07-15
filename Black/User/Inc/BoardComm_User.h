@@ -53,22 +53,40 @@
  */
 
 /* ֡ͷ�� 1 �ֽڡ����ն������ж�һ֡���ݵĿ�ʼ�� */
-#define BOARD_COMM_HEAD1        0xA5
+#define BOARD_COMM_HEAD1        0xD3U
 
 /* ֡ͷ�� 2 �ֽڡ�˫�ֽ�֡ͷ���Խ������и��ʡ� */
-#define BOARD_COMM_HEAD2        0x5A
+#define BOARD_COMM_HEAD2        0x91U
+#define BOARD_COMM_TAIL1        0x91U
+#define BOARD_COMM_TAIL2        0xD3U
+#define BOARD_COMM_VERSION      0x02U
+#define BOARD_COMM_NODE_BLACK   0x01U
+#define BOARD_COMM_NODE_BLUE    0x02U
+#define BOARD_COMM_NODE_BROADCAST 0xFFU
+#define BOARD_COMM_FLAG_ACK_REQ 0x01U
+#define BOARD_COMM_FLAG_RESPONSE 0x02U
+#define BOARD_COMM_FLAG_EVENT   0x04U
+#define BOARD_COMM_FLAG_ERROR   0x08U
 
 /* ��֡������������ȣ���λ�ֽڡ� */
 #define BOARD_COMM_MAX_PAYLOAD  128
 
 /* ���ջ��������ȣ�2 �ֽ�֡ͷ + CMD + LEN + ��� DATA + CHECKSUM�� */
-#define BOARD_COMM_RX_BUF_SIZE  (BOARD_COMM_MAX_PAYLOAD + 5U)
+#define BOARD_COMM_FRAME_OVERHEAD 15U
+#define BOARD_COMM_RX_BUF_SIZE  (BOARD_COMM_MAX_PAYLOAD + BOARD_COMM_FRAME_OVERHEAD)
 
 /* ����ʽ����ʹ�õ�Ĭ�ϳ�ʱʱ�䣬��λ ms�� */
 #define BOARD_COMM_TIMEOUT_MS   20
 
 /* �����֣����;�����̼�ֵ�������� 1 �ֽڣ�����Ϊ ASCII ��ֵ������ '7'��'A'�� */
-#define BOARD_COMM_CMD_KEYPAD   0x10U
+#define BOARD_COMM_CMD_PING     0x02U
+#define BOARD_COMM_CMD_SOURCE_STAGE  0x10U
+#define BOARD_COMM_CMD_SOURCE_COMMIT 0x11U
+#define BOARD_COMM_CMD_SOURCE_GET_STATUS 0x12U
+#define BOARD_COMM_CMD_SOURCE_STATUS 0x13U
+#define BOARD_COMM_CMD_ACK      0x7FU
+#define BOARD_COMM_CMD_KEYPAD   0x30U
+#define BOARD_COMM_CMD_UI_STATE 0x31U
 /* �����֣���������ӻ���һ�ζ����첨 ADC��
  * �����غɣ�point_index(u16) + rf_khz(u32) + lo_khz(u32)��
  * ��Ӧ�غɣ�point_index(u16) + detector_mv(u16) + detector_dbm_x10(i16) + valid(u8)��
@@ -135,6 +153,8 @@ void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, Bo
  * �� len Ϊ 0 ʱ��data ���Դ� 0��
  */
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len);
+BoardComm_Status BoardComm_SendV2(uint8_t dst, uint8_t cmd, uint8_t flags,
+                                  uint16_t seq, const uint8_t *data, uint8_t len);
 
 /* Send an already encoded frame on the Black-Blue UART. */
 BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout);
