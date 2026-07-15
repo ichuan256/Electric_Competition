@@ -8,8 +8,7 @@
 #include "lcd.h"
 #include "led.h"
 
-#define DISPLAY_STATUS_HEADER_LEN 17U
-#define DISPLAY_WAVE_PAYLOAD_LEN  14U
+#define DISPLAY_STATUS_HEADER_LEN 6U
 #define DISPLAY_FIELD_BOX_W       75U
 #define DISPLAY_FIELD_BOX_H       40U
 #define DISPLAY_FIELD_BOX_GAP     3U
@@ -37,7 +36,6 @@ static uint16_t display_last_rx_size = 0U;
 static uint8_t display_force_refresh = 1U;
 static uint8_t display_refresh_requested = 0U;
 static uint8_t display_info_refresh_requested = 0U;
-static uint8_t display_last_apply_counter = 0xFFU;
 static uint8_t display_last_fpga_queue_index = 0xFFU;
 static uint8_t display_last_fpga_queue_count = 0xFFU;
 static uint8_t display_last_fpga_dirty = 0xFFU;
@@ -53,6 +51,26 @@ static uint8_t display_last_fft_seq = 0xFFU;
 static uint32_t display_lcr_last_ftw = 0UL;
 static uint64_t display_lcr_last_frequency_mHz = 0ULL;
 static uint16_t display_lcr_last_bin = 0U;
+
+typedef struct {
+  uint16_t transaction_id;
+  uint8_t valid;
+  uint8_t channel_id;
+  uint8_t wave_count;
+  uint8_t generation_mode;
+  uint16_t cache_points;
+  int16_t offset_code;
+  FpgaUartWaveConfig waves[SPECTRUM_DISPLAY_SUM_MAX_WAVES];
+} SpectrumSourceStage;
+
+static SpectrumSourceStage display_source_stage;
+static uint16_t display_source_last_transaction;
+static uint16_t display_source_last_applied_mask;
+static uint8_t display_source_commit_pending;
+static uint16_t display_source_pending_transaction;
+static uint16_t display_source_pending_mask;
+static uint32_t display_source_pending_rx_count;
+static uint32_t display_source_pending_error_count;
 
 static uint16_t Spectrum_ReadU16(const uint8_t *buf, uint8_t *pos)
 {
@@ -72,9 +90,196 @@ static uint32_t Spectrum_ReadU32(const uint8_t *buf, uint8_t *pos)
   return value;
 }
 
-static int16_t Spectrum_ReadI16(const uint8_t *buf, uint8_t *pos)
+uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
+                                          uint8_t len, uint16_t *transaction_id,
+                                          uint16_t *applied_mask)
 {
-  return (int16_t)Spectrum_ReadU16(buf, pos);
+  uint8_t pos = 0U;
+
+  if ((data == 0) || (transaction_id == 0) || (applied_mask == 0))
+  {
+    return 0x02U;
+  }
+  *transaction_id = 0U;
+  *applied_mask = 0U;
+
+  if (cmd == BOARD_COMM_CMD_SOURCE_STAGE)
+  {
+    uint8_t channel_id;
+    uint8_t output_enable;
+    uint8_t generation_mode;
+    uint8_t count;
+    int32_t offset_uunit;
+
+    if (len < 18U)
+    {
+      return 0x02U;
+    }
+    *transaction_id = Spectrum_ReadU16(data, &pos);
+    channel_id = data[pos++];
+    output_enable = data[pos++];
+    generation_mode = data[pos++];
+    count = data[pos++];
+    pos = (uint8_t)(pos + 2U);
+    offset_uunit = (int32_t)Spectrum_ReadU32(data, &pos);
+    display_source_stage.cache_points = Spectrum_ReadU16(data, &pos);
+    pos = (uint8_t)(pos + 4U);
+
+    if ((count > SPECTRUM_DISPLAY_SUM_MAX_WAVES) ||
+        (len != (uint8_t)(18U + count * 20U)) ||
+        (generation_mode > 2U))
+    {
+      return 0x06U;
+    }
+    if (channel_id > 1U)
+    {
+      return 0x04U;
+    }
+    if (channel_id == 1U)
+    {
+      return 0x0AU;
+    }
+    if ((display_source_commit_pending != 0U) &&
+        (*transaction_id != display_source_pending_transaction))
+    {
+      return 0x08U;
+    }
+
+    display_source_stage.transaction_id = *transaction_id;
+    display_source_stage.channel_id = channel_id;
+    display_source_stage.wave_count = count;
+    display_source_stage.generation_mode = generation_mode;
+    display_source_stage.offset_code = (int16_t)(offset_uunit / 1000L);
+    display_source_stage.valid = 0U;
+
+    for (uint8_t i = 0U; i < count; i++)
+    {
+      uint8_t slot = data[pos++];
+      uint8_t waveform = data[pos++];
+      uint16_t component_flags = Spectrum_ReadU16(data, &pos);
+      uint32_t frequency_cHz = Spectrum_ReadU32(data, &pos);
+      int32_t phase_mdeg = (int32_t)Spectrum_ReadU32(data, &pos);
+      uint32_t amplitude_uunit = Spectrum_ReadU32(data, &pos);
+      uint32_t duty_ppm = Spectrum_ReadU32(data, &pos);
+      FpgaUartWaveConfig *wave;
+
+      if ((slot >= count) || (waveform > 4U))
+      {
+        return 0x06U;
+      }
+      wave = &display_source_stage.waves[slot];
+      wave->frequency_hz = (frequency_cHz + 50UL) / 100UL;
+      phase_mdeg %= 360000L;
+      if (phase_mdeg < 0L)
+      {
+        phase_mdeg += 360000L;
+      }
+      wave->phase_deg = (uint16_t)((phase_mdeg + 500L) / 1000L);
+      wave->amplitude_code = (uint16_t)((((amplitude_uunit / 1000UL) * 8191UL) + 5000UL) / 10000UL);
+      wave->duty_code = (uint16_t)((((duty_ppm / 1000UL) * 65535UL) + 500UL) / 1000UL);
+      wave->offset_code = 0;
+      wave->waveform = (waveform == 0U) ? 0U : (uint8_t)(waveform - 1U);
+      wave->enable = ((output_enable != 0U) && ((component_flags & 1U) != 0U)) ? 1U : 0U;
+    }
+    display_source_stage.valid = 1U;
+    return 0x00U;
+  }
+
+  if (cmd == BOARD_COMM_CMD_SOURCE_COMMIT)
+  {
+    uint8_t channel_mask;
+    uint8_t control = FPGA_UART_CONTROL_REALTIME;
+    uint16_t period_points;
+    FpgaUartState fpga;
+
+    if (len != 8U)
+    {
+      return 0x02U;
+    }
+    *transaction_id = Spectrum_ReadU16(data, &pos);
+    channel_mask = data[pos++];
+    if ((*transaction_id == display_source_last_transaction) &&
+        (channel_mask == display_source_last_applied_mask))
+    {
+      *applied_mask = channel_mask;
+      return 0x00U;
+    }
+    if (display_source_commit_pending != 0U)
+    {
+      if ((*transaction_id != display_source_pending_transaction) ||
+          (channel_mask != display_source_pending_mask))
+      {
+        return 0x08U;
+      }
+      fpga = FpgaUart_GetState();
+      if ((fpga.rx_count > display_source_pending_rx_count) &&
+          (fpga.last_ack_cmd == 0xC0U) && (fpga.last_ack_status == 0U) &&
+          (fpga.dirty_mask == 0U))
+      {
+        display_source_commit_pending = 0U;
+        display_source_last_transaction = *transaction_id;
+        display_source_last_applied_mask = channel_mask;
+        display_state.channel_id = display_source_stage.channel_id;
+        display_state.wave_count = display_source_stage.wave_count;
+        display_state.output_bias_mv = display_source_stage.offset_code;
+        display_state.fpga_output_mode =
+            (display_source_stage.generation_mode == 2U) ? 1U : 0U;
+        display_state.apply_counter = (uint8_t)*transaction_id;
+        memcpy(display_state.waves, display_source_stage.waves, sizeof(display_state.waves));
+        display_source_stage.valid = 0U;
+        display_refresh_requested = 1U;
+        *applied_mask = channel_mask;
+        return 0x00U;
+      }
+      if ((fpga.error_count > display_source_pending_error_count) &&
+          (fpga.waiting_ack == 0U) && (fpga.queue_count == 0U))
+      {
+        display_source_commit_pending = 0U;
+        display_source_stage.valid = 0U;
+        return 0x0CU;
+      }
+      return 0x08U;
+    }
+    if ((display_source_stage.valid == 0U) ||
+        (display_source_stage.transaction_id != *transaction_id))
+    {
+      return 0x09U;
+    }
+    if (channel_mask != (uint8_t)(1U << display_source_stage.channel_id))
+    {
+      return 0x06U;
+    }
+    if (display_source_stage.generation_mode == 2U)
+    {
+      control = FPGA_UART_CONTROL_CACHE;
+    }
+    period_points = display_source_stage.cache_points;
+    if ((control == FPGA_UART_CONTROL_CACHE) && (period_points == 0U) &&
+        (display_source_stage.wave_count != 0U) &&
+        (display_source_stage.waves[0].frequency_hz != 0UL))
+    {
+      uint32_t points = (DISPLAY_FPGA_SAMPLE_HZ +
+                         display_source_stage.waves[0].frequency_hz / 2UL) /
+                        display_source_stage.waves[0].frequency_hz;
+      if (points < DISPLAY_FPGA_POINTS_MIN) { points = DISPLAY_FPGA_POINTS_MIN; }
+      if (points > DISPLAY_FPGA_POINTS_MAX) { points = DISPLAY_FPGA_POINTS_MAX; }
+      period_points = (uint16_t)points;
+    }
+    FpgaUart_SetMultiwave(display_source_stage.channel_id,
+                          display_source_stage.wave_count,
+                          display_source_stage.waves,
+                          display_source_stage.offset_code,
+                          control, period_points);
+    fpga = FpgaUart_GetState();
+    display_source_commit_pending = 1U;
+    display_source_pending_transaction = *transaction_id;
+    display_source_pending_mask = channel_mask;
+    display_source_pending_rx_count = fpga.rx_count;
+    display_source_pending_error_count = fpga.error_count;
+    return 0x08U;
+  }
+
+  return 0x05U;
 }
 
 static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
@@ -315,7 +520,6 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
 {
   SpectrumDisplayState previous_state;
   uint8_t pos = 0U;
-  uint8_t i;
   uint8_t changed;
 
   if ((data == 0) || (len < DISPLAY_STATUS_HEADER_LEN))
@@ -326,22 +530,12 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
   previous_state = display_state;
 
   display_state.mode = data[pos++];
-  display_state.state = data[pos++];
   display_state.channel_id = data[pos++] & 0x01U;
-  display_state.wave_count = data[pos++];
   display_state.selected_wave = data[pos++];
   display_state.ui_focus = data[pos++];
   display_state.ui_editing = data[pos++];
   display_state.ui_input_len = data[pos++];
 
-  if (display_state.wave_count < 1U)
-  {
-    display_state.wave_count = 1U;
-  }
-  if (display_state.wave_count > SPECTRUM_DISPLAY_SUM_MAX_WAVES)
-  {
-    display_state.wave_count = SPECTRUM_DISPLAY_SUM_MAX_WAVES;
-  }
   if (display_state.selected_wave >= SPECTRUM_DISPLAY_SUM_MAX_WAVES)
   {
     display_state.selected_wave = 0U;
@@ -355,50 +549,12 @@ static void Spectrum_ParseStatus(const uint8_t *data, uint8_t len)
     display_state.ui_input_len = SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN;
   }
 
+  if (len < (uint8_t)(pos + SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN))
+  {
+    return;
+  }
   memcpy(display_state.ui_input, &data[pos], SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN);
   display_state.ui_input[display_state.ui_input_len] = '\0';
-  pos = (uint8_t)(pos + SPECTRUM_DISPLAY_UI_INPUT_MAX_LEN);
-
-  display_state.apply_counter = data[pos++];
-
-  for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
-  {
-    if ((uint8_t)(pos + DISPLAY_WAVE_PAYLOAD_LEN) > len)
-    {
-      break;
-    }
-
-    display_state.waves[i].frequency_hz = Spectrum_ReadU32(data, &pos);
-    display_state.waves[i].phase_deg = Spectrum_ReadU16(data, &pos);
-    display_state.waves[i].amplitude_code = Spectrum_ReadU16(data, &pos);
-    display_state.waves[i].offset_code = Spectrum_ReadI16(data, &pos);
-    display_state.waves[i].duty_code = Spectrum_ReadU16(data, &pos);
-    display_state.waves[i].waveform = data[pos++];
-    display_state.waves[i].enable = data[pos++];
-  }
-
-  if ((uint8_t)(pos + 2U) <= len)
-  {
-    display_state.output_bias_mv = Spectrum_ReadI16(data, &pos);
-  }
-  if (pos < len)
-  {
-    display_state.fpga_output_mode = (data[pos] != 0U) ? 1U : 0U;
-  }
-
-  if (display_state.apply_counter != display_last_apply_counter)
-  {
-    uint8_t previous_apply_counter = display_last_apply_counter;
-    display_last_apply_counter = display_state.apply_counter;
-    if (display_state.mode == SPECTRUM_DISPLAY_MODE_LCR_TEST)
-    {
-      (void)previous_apply_counter;
-    }
-    else
-    {
-      Spectrum_SendSumToFpga();
-    }
-  }
 
   changed = (memcmp(&previous_state, &display_state, sizeof(display_state)) != 0) ? 1U : 0U;
   if (changed != 0U)
@@ -653,6 +809,10 @@ static void Spectrum_DrawScreen(void)
 void SpectrumDisplay_Init(void)
 {
   Spectrum_LoadDefaults();
+  memset(&display_source_stage, 0, sizeof(display_source_stage));
+  display_source_last_transaction = 0xFFFFU;
+  display_source_last_applied_mask = 0U;
+  display_source_commit_pending = 0U;
   lcd_clear(WHITE);
   Spectrum_DrawScreen();
 }

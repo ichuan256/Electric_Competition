@@ -6,6 +6,9 @@
 
 static SpectrumHostSnapshot spectrum_snapshot;
 static uint32_t spectrum_last_status_tick;
+static uint8_t spectrum_last_source_result = 0xFFU;
+static uint8_t spectrum_source_apply_seen = 0xFFU;
+static uint16_t spectrum_source_transaction;
 extern float dds_factor;
 
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
@@ -14,17 +17,62 @@ static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
   buf[(*pos)++] = (uint8_t)((value >> 8) & 0xFFU);
 }
 
-static void Spectrum_WriteI16(uint8_t *buf, uint8_t *pos, int16_t value)
-{
-  Spectrum_WriteU16(buf, pos, (uint16_t)value);
-}
-
 static void Spectrum_WriteU32(uint8_t *buf, uint8_t *pos, uint32_t value)
 {
   buf[(*pos)++] = (uint8_t)(value & 0xFFUL);
   buf[(*pos)++] = (uint8_t)((value >> 8) & 0xFFUL);
   buf[(*pos)++] = (uint8_t)((value >> 16) & 0xFFUL);
   buf[(*pos)++] = (uint8_t)((value >> 24) & 0xFFUL);
+}
+
+static void Spectrum_SendSourceTransaction(void)
+{
+  uint8_t payload[98];
+  uint8_t pos = 0U;
+  uint8_t enabled = 0U;
+  uint16_t transaction_id = spectrum_source_transaction;
+
+  Spectrum_WriteU16(payload, &pos, transaction_id);
+  payload[pos++] = spectrum_snapshot.channel_id;
+  for (uint8_t i = 0U; i < spectrum_snapshot.wave_count; i++)
+  {
+    enabled |= spectrum_snapshot.waves[i].enable;
+  }
+  payload[pos++] = (enabled != 0U) ? 1U : 0U;
+  payload[pos++] = (spectrum_snapshot.fpga_output_mode != 0U) ? 2U : 1U;
+  payload[pos++] = spectrum_snapshot.wave_count;
+  payload[pos++] = 0U;
+  payload[pos++] = 0U;
+  Spectrum_WriteU32(payload, &pos, (uint32_t)((int32_t)spectrum_snapshot.output_bias_mv * 1000));
+  Spectrum_WriteU16(payload, &pos, 0U);
+  Spectrum_WriteU16(payload, &pos, 1000U);
+  Spectrum_WriteU16(payload, &pos, 0U);
+
+  for (uint8_t i = 0U; i < spectrum_snapshot.wave_count; i++)
+  {
+    const SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
+    uint32_t amplitude_scale = (spectrum_snapshot.channel_id == 0U) ? 10000UL : 1000UL;
+    payload[pos++] = i;
+    payload[pos++] = (uint8_t)(wave->waveform + 1U);
+    Spectrum_WriteU16(payload, &pos, (wave->enable != 0U) ? 1U : 0U);
+    Spectrum_WriteU32(payload, &pos, wave->frequency_hz * 100UL);
+    Spectrum_WriteU32(payload, &pos, (uint32_t)((int32_t)wave->phase_deg * 1000));
+    Spectrum_WriteU32(payload, &pos,
+                      (((uint32_t)wave->amplitude_code * amplitude_scale + 4095UL) / 8191UL) * 1000UL);
+    Spectrum_WriteU32(payload, &pos,
+                      (((uint32_t)wave->duty_code * 1000UL + 32767UL) / 65535UL) * 1000UL);
+  }
+
+  (void)BoardComm_SendV2(BOARD_COMM_NODE_BLUE, BOARD_COMM_CMD_SOURCE_STAGE,
+                         BOARD_COMM_FLAG_ACK_REQ, transaction_id, payload, pos);
+
+  pos = 0U;
+  Spectrum_WriteU16(payload, &pos, transaction_id);
+  payload[pos++] = (uint8_t)(1U << spectrum_snapshot.channel_id);
+  payload[pos++] = 0x09U;
+  Spectrum_WriteU32(payload, &pos, 0UL);
+  (void)BoardComm_SendV2(BOARD_COMM_NODE_BLUE, BOARD_COMM_CMD_SOURCE_COMMIT,
+                         BOARD_COMM_FLAG_ACK_REQ, (uint16_t)(transaction_id + 1U), payload, pos);
 }
 
 static uint8_t Spectrum_IsDigit(char key)
@@ -514,13 +562,11 @@ static void Spectrum_CommitInput(void)
 
 static void Spectrum_SendStatus(void)
 {
-  uint8_t payload[128];
+  uint8_t payload[16];
   uint8_t pos = 0U;
 
   payload[pos++] = spectrum_snapshot.mode;
-  payload[pos++] = (uint8_t)spectrum_snapshot.state;
   payload[pos++] = spectrum_snapshot.channel_id;
-  payload[pos++] = spectrum_snapshot.wave_count;
   payload[pos++] = spectrum_snapshot.selected_wave;
   payload[pos++] = spectrum_snapshot.ui_focus;
   payload[pos++] = spectrum_snapshot.ui_editing;
@@ -529,21 +575,16 @@ static void Spectrum_SendStatus(void)
   {
     payload[pos++] = (uint8_t)spectrum_snapshot.ui_input[i];
   }
-  payload[pos++] = spectrum_snapshot.apply_counter;
-
-  for (uint8_t i = 0U; i < SPECTRUM_SUM_MAX_WAVES; i++)
+  if ((spectrum_snapshot.mode == SPECTRUM_MODE_SUM_WAVEFORM) &&
+      (spectrum_last_source_result != spectrum_snapshot.apply_counter))
   {
-    SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
-    Spectrum_WriteU32(payload, &pos, wave->frequency_hz);
-    Spectrum_WriteU16(payload, &pos, wave->phase_deg);
-    Spectrum_WriteU16(payload, &pos, wave->amplitude_code);
-    Spectrum_WriteI16(payload, &pos, wave->offset_code);
-    Spectrum_WriteU16(payload, &pos, wave->duty_code);
-    payload[pos++] = wave->waveform;
-    payload[pos++] = wave->enable;
+    if (spectrum_source_apply_seen != spectrum_snapshot.apply_counter)
+    {
+      spectrum_source_apply_seen = spectrum_snapshot.apply_counter;
+      spectrum_source_transaction++;
+    }
+    Spectrum_SendSourceTransaction();
   }
-  Spectrum_WriteI16(payload, &pos, spectrum_snapshot.output_bias_mv);
-  payload[pos++] = spectrum_snapshot.fpga_output_mode;
 
   (void)BoardComm_Send(BOARD_COMM_CMD_SYS_STATUS, payload, pos);
 }
@@ -577,6 +618,9 @@ static void Spectrum_LoadDefaults(void)
 void SpectrumSystem_Init(void)
 {
   Spectrum_LoadDefaults();
+  spectrum_last_source_result = 0xFFU;
+  spectrum_source_apply_seen = 0xFFU;
+  spectrum_source_transaction = 0U;
   Spectrum_UpdateDdsSine();
   spectrum_last_status_tick = HAL_GetTick();
   Spectrum_SendStatus();
@@ -596,10 +640,16 @@ void SpectrumSystem_Task(void)
 
 void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, BoardComm_Status status)
 {
-  (void)cmd;
-  (void)data;
-  (void)len;
-  (void)status;
+  if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_ACK) &&
+      (data != 0) && (len >= 8U) &&
+      (data[0] == BOARD_COMM_CMD_SOURCE_COMMIT))
+  {
+    uint16_t transaction_id = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+    if ((transaction_id == spectrum_source_transaction) && (data[1] != 0x08U))
+    {
+      spectrum_last_source_result = spectrum_snapshot.apply_counter;
+    }
+  }
 }
 
 void SpectrumSystem_OnKey(char key)
@@ -630,6 +680,8 @@ void SpectrumSystem_OnKey(char key)
   else if (key == 'A')
   {
     Spectrum_LoadDefaults();
+    spectrum_last_source_result = 0xFFU;
+    spectrum_source_apply_seen = 0xFFU;
     Spectrum_UpdateDdsSine();
   }
   else if (key == 'B')

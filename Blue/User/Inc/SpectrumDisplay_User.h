@@ -44,6 +44,9 @@ typedef struct {
 
 void SpectrumDisplay_Init(void);
 void SpectrumDisplay_Task(void);
+uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
+                                          uint8_t len, uint16_t *transaction_id,
+                                          uint16_t *applied_mask);
 SpectrumDisplayState SpectrumDisplay_GetState(void);
 
 #endif
