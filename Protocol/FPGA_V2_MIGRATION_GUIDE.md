@@ -86,7 +86,7 @@ repeat component_count times:
   u16 component_flags  // bit0 enable
   u32 ftw
   u32 phase_word
-  u16 amplitude_code   // 0..8191
+  u16 amplitude_code   // 0..8191，8191=单分量峰值3500mV
   u16 duty_code        // 0..65535
 ```
 
@@ -166,10 +166,12 @@ u16 applied_mask
 
 ## 7. 波形引擎建议
 
-- `ftw = round(f * 2^32 / 100000000)`，32 位相位累加器自然回绕。
+- 当 AD9910 的 1 GHz 系统时钟与 FPGA 的 100 MHz 采样时钟来自同一外部时钟时，必须用 `ad9910_ftw = round(f * 2^32 / 1000000000)`，再令 `fpga_ftw = ad9910_ftw * 10`。不得在 FPGA 端独立按 100 MHz 重新取整，否则会产生持续相位漂移。
+- FPGA 仍使用 32 位相位累加器自然回绕。
 - `phase_word` 是初相对应的 32 位整周相位字。
 - SINE 建议使用 ROM/CORDIC；方波由相位与 `duty_code` 比较；三角波和锯齿波由相位字映射。
 - 每个分量先生成有符号幅值，再乘 `amplitude_code`。
+- CH1、CH2 量程均为 7 Vpp；`amplitude_code=8191` 对应单分量峰值 3500 mV。
 - 四路叠加和偏置应在至少 18～20 位有符号位宽完成。
 - `channel_flags.bit1=1` 时饱和到 `-8192..8191`；禁止直接截低 14 位造成回绕。
 - 每通道维护 `clipping` 标志和饱和计数。

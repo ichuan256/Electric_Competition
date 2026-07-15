@@ -770,7 +770,7 @@ void AD9910_Singal_Profile_Set_1(uint8_t addr,uint32_t Freq,uint16_t Amp ,uint16
 	  uint32_t Temp_Fre,Temp_Amp,Temp_Pha; 
 		uint8_t  Temp_addr;
 		int k;
-	  Temp_Fre=(uint32_t)Freq*4.294967296;											// 频率对应上频率的FTW		4.294967296=(2^32)/1000000000		设置的范围是（1Hz~450MHz）
+	  Temp_Fre=(uint32_t)((((uint64_t)Freq << 32) + 500000000ULL) / 1000000000ULL);	// 按1 GHz系统时钟整数四舍五入，作为FPGA FTW的同源基准
 		Temp_Pha=(uint16_t)Pha*182.044444444;										// 相位对应上相位的POW		182.044444444=2^16/360					设置的范围是（0~360°）
 		Temp_Amp=Amp;						// ASF 14-bit占据寄存器[13:0]，直接写入即可（非[15:2]）
 	
