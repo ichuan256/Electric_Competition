@@ -17,9 +17,10 @@
 #define DISPLAY_TABLE_X           8U
 #define DISPLAY_TABLE_Y           154U
 #define DISPLAY_TABLE_W           464U
-#define DISPLAY_TABLE_ROW_H       24U
+#define DISPLAY_TABLE_ROW_H       22U
 #define DISPLAY_TABLE_ROWS        5U
-#define DISPLAY_INFO_Y            284U
+#define DISPLAY_INFO_Y            268U
+#define DISPLAY_INFO_LINE_GAP     20U
 #define DISPLAY_LCR_FREQ_HZ       1000000UL
 #define DISPLAY_LCR_DDS_CLK_HZ    1000000000ULL
 #define DISPLAY_LCR_ADC_FS_HZ     2500000UL
@@ -772,7 +773,8 @@ static void Spectrum_DrawInfo(void)
            fpga.queue_count,
            fpga.waiting_ack,
            fpga.retry_count);
-  lcd_show_string(8U, 304U, 464U, 16U, 16U, line, BLACK);
+  lcd_show_string(8U, (uint16_t)(DISPLAY_INFO_Y + DISPLAY_INFO_LINE_GAP),
+                  464U, 16U, 16U, line, BLACK);
 }
 
 static void Spectrum_DrawLcrPage(void)
