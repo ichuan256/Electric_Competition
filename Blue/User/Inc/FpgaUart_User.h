@@ -28,18 +28,28 @@ typedef struct {
   uint8_t dirty_mask;
   uint8_t queue_count;
   uint8_t queue_index;
+  uint8_t waiting_ack;
+  uint8_t retry_count;
+  uint8_t rx_dma_active;
+  uint16_t rx_dma_write_pos;
+  uint16_t rx_dma_read_pos;
+  uint32_t rx_dma_count;
   HAL_StatusTypeDef last_tx_status;
   HAL_StatusTypeDef last_rx_status;
 } FpgaUartState;
 
 void FpgaUart_Init(void);
 void FpgaUart_Task(void);
-void FpgaUart_SetSignal(uint32_t frequency_hz, uint16_t phase_deg,
+void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
+                           const FpgaUartWaveConfig *waves,
+                           int16_t offset_code);
+void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phase_deg,
                         uint16_t amplitude_code, int16_t offset_code,
                         uint16_t duty_code, uint8_t waveform,
                         uint8_t output_enable);
 void FpgaUart_SetSum(uint8_t channel_id, uint8_t wave_count,
                      const FpgaUartWaveConfig *waves);
+void FpgaUart_SendTestFrame(void);
 FpgaUartState FpgaUart_GetState(void);
 
 #endif

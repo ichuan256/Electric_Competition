@@ -1,10 +1,31 @@
 #include "BoardComm_User.h"
+#include "AdcFftProtocol_User.h"
 #include "LogDetector_User.h"
 
 static UART_HandleTypeDef *board_comm_uart = &huart1;
 static uint8_t board_comm_rx_buf[BOARD_COMM_RX_BUF_SIZE];
 
 #define BOARD_COMM_QUEUE_DEPTH 8U
+#define BOARD_COMM_ADC_FFT_HEADER_LEN     9U
+#define BOARD_COMM_ADC_FFT_OVERHEAD       13U
+#define BOARD_COMM_ADC_FFT_MAX_FRAME_LEN  49U
+
+typedef enum {
+  BOARD_COMM_FRAME_NO_MATCH = 0,
+  BOARD_COMM_FRAME_READY,
+  BOARD_COMM_FRAME_INCOMPLETE,
+  BOARD_COMM_FRAME_INVALID
+} BoardComm_FrameProbeResult;
+
+typedef BoardComm_FrameProbeResult (*BoardComm_FrameProbe)(const uint8_t *data,
+                                                            uint16_t available,
+                                                            uint16_t *frame_size);
+typedef void (*BoardComm_FrameDispatch)(const uint8_t *frame, uint16_t frame_size);
+
+typedef struct {
+  BoardComm_FrameProbe probe;
+  BoardComm_FrameDispatch dispatch;
+} BoardComm_FrameDecoder;
 
 typedef struct {
   uint8_t cmd;
@@ -157,6 +178,71 @@ static void BoardComm_StoreRxFrame(uint8_t cmd, const uint8_t *data, uint8_t len
   board_comm_queue_count++;
 }
 
+static BoardComm_FrameProbeResult BoardComm_ProbeStandardFrame(const uint8_t *data,
+                                                                uint16_t available,
+                                                                uint16_t *frame_size)
+{
+  if ((available < 2U) || (data[0] != BOARD_COMM_HEAD1) || (data[1] != BOARD_COMM_HEAD2))
+  {
+    return BOARD_COMM_FRAME_NO_MATCH;
+  }
+  if (available < 4U)
+  {
+    return BOARD_COMM_FRAME_INCOMPLETE;
+  }
+  if (data[3] > BOARD_COMM_MAX_PAYLOAD)
+  {
+    return BOARD_COMM_FRAME_INVALID;
+  }
+
+  *frame_size = (uint16_t)data[3] + 5U;
+  return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
+}
+
+static void BoardComm_DispatchStandardFrame(const uint8_t *frame, uint16_t frame_size)
+{
+  uint8_t cmd = 0U;
+  uint8_t len = 0U;
+  const uint8_t *data = 0;
+  BoardComm_Status status = BoardComm_ParseFrame(frame, frame_size, &cmd, &data, &len);
+
+  BoardComm_StoreRxFrame(cmd, data, len, status);
+}
+
+static BoardComm_FrameProbeResult BoardComm_ProbeAdcFftFrame(const uint8_t *data,
+                                                              uint16_t available,
+                                                              uint16_t *frame_size)
+{
+  uint16_t payload_len;
+
+  if (AdcFftProtocol_IsFrameStart(data, available) == 0U)
+  {
+    return BOARD_COMM_FRAME_NO_MATCH;
+  }
+  if (available < BOARD_COMM_ADC_FFT_HEADER_LEN)
+  {
+    return BOARD_COMM_FRAME_INCOMPLETE;
+  }
+
+  payload_len = (uint16_t)data[7] | ((uint16_t)data[8] << 8);
+  *frame_size = (uint16_t)(BOARD_COMM_ADC_FFT_OVERHEAD + payload_len);
+  if (*frame_size > BOARD_COMM_ADC_FFT_MAX_FRAME_LEN)
+  {
+    return BOARD_COMM_FRAME_INVALID;
+  }
+  return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
+}
+
+static void BoardComm_DispatchAdcFftFrame(const uint8_t *frame, uint16_t frame_size)
+{
+  (void)AdcFftProtocol_HandleRxBuffer(frame, frame_size);
+}
+
+static const BoardComm_FrameDecoder board_comm_frame_decoders[] = {
+  {BoardComm_ProbeStandardFrame, BoardComm_DispatchStandardFrame},
+  {BoardComm_ProbeAdcFftFrame, BoardComm_DispatchAdcFftFrame}
+};
+
 void BoardComm_Init(void)
 {
   board_comm_uart = &huart1;
@@ -204,13 +290,7 @@ BoardComm_Status BoardComm_StopReceiveIT(void)
 
 void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
 {
-  uint8_t cmd = 0;
-  uint8_t len = 0;
-  const uint8_t *data = 0;
-  BoardComm_Status status;
   uint16_t offset = 0;
-  uint16_t remain;
-  uint16_t frame_size;
 
   if ((huart == 0) || (huart != board_comm_uart))
   {
@@ -221,42 +301,42 @@ void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
 
   while (offset < size)
   {
-    cmd = 0;
-    len = 0;
-    data = 0;
-    remain = (uint16_t)(size - offset);
+    uint8_t matched = 0U;
+    uint16_t available = (uint16_t)(size - offset);
 
-    /* Receive-to-idle may return several back-to-back frames in one callback.
-       Parse from the current frame header instead of treating Size as one frame. */
-    if (remain < 5U)
+    for (uint32_t i = 0U; i < (sizeof(board_comm_frame_decoders) /
+                               sizeof(board_comm_frame_decoders[0])); i++)
     {
-      BoardComm_StoreRxFrame(0, 0, 0, BOARD_COMM_LENGTH_ERROR);
+      uint16_t frame_size = 0U;
+      BoardComm_FrameProbeResult result =
+          board_comm_frame_decoders[i].probe(&board_comm_rx_buf[offset], available, &frame_size);
+
+      if (result == BOARD_COMM_FRAME_NO_MATCH)
+      {
+        continue;
+      }
+
+      matched = 1U;
+      if (result == BOARD_COMM_FRAME_READY)
+      {
+        board_comm_frame_decoders[i].dispatch(&board_comm_rx_buf[offset], frame_size);
+        offset = (uint16_t)(offset + frame_size);
+      }
+      else
+      {
+        BoardComm_StoreRxFrame(0, 0, 0,
+                               (result == BOARD_COMM_FRAME_INCOMPLETE) ?
+                               BOARD_COMM_LENGTH_ERROR : BOARD_COMM_ERROR);
+        offset = size;
+      }
       break;
     }
 
-    if ((board_comm_rx_buf[offset] != BOARD_COMM_HEAD1) ||
-        (board_comm_rx_buf[offset + 1U] != BOARD_COMM_HEAD2))
+    if (matched == 0U)
     {
       BoardComm_StoreRxFrame(0, 0, 0, BOARD_COMM_ERROR);
-      break;
+      offset++;
     }
-
-    if (board_comm_rx_buf[offset + 3U] > BOARD_COMM_MAX_PAYLOAD)
-    {
-      BoardComm_StoreRxFrame(board_comm_rx_buf[offset + 2U], 0, 0, BOARD_COMM_LENGTH_ERROR);
-      break;
-    }
-
-    frame_size = (uint16_t)board_comm_rx_buf[offset + 3U] + 5U;
-    if (frame_size > remain)
-    {
-      BoardComm_StoreRxFrame(board_comm_rx_buf[offset + 2U], 0, 0, BOARD_COMM_LENGTH_ERROR);
-      break;
-    }
-
-    status = BoardComm_ParseFrame(&board_comm_rx_buf[offset], frame_size, &cmd, &data, &len);
-    BoardComm_StoreRxFrame(cmd, data, len, status);
-    offset = (uint16_t)(offset + frame_size);
   }
 
   (void)BoardComm_StartReceiveToIdleIT();
@@ -382,6 +462,19 @@ BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
     return BOARD_COMM_TIMEOUT;
   }
 
+  return BOARD_COMM_OK;
+}
+
+BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout)
+{
+  if ((board_comm_uart == 0) || (frame == 0) || (len == 0U))
+  {
+    return BOARD_COMM_ERROR;
+  }
+  if (HAL_UART_Transmit(board_comm_uart, (uint8_t *)frame, len, timeout) != HAL_OK)
+  {
+    return BOARD_COMM_TIMEOUT;
+  }
   return BOARD_COMM_OK;
 }
 

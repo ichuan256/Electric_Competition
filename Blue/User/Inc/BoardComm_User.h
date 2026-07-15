@@ -62,6 +62,7 @@ BoardComm_Status BoardComm_StopReceiveIT(void);
 void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size);
 void BoardComm_ProcessTask(void);
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len);
+BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout);
 BoardComm_Status BoardComm_Ping(void);
 BoardComm_State BoardComm_GetState(void);
 uint8_t BoardComm_TakeKeypadKey(char *key);

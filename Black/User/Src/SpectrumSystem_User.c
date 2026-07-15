@@ -1,9 +1,12 @@
 #include "SpectrumSystem_User.h"
 
+#include "AD9910_User.h"
+#include "AdcFftClient_User.h"
 #include "BoardComm_User.h"
 
 static SpectrumHostSnapshot spectrum_snapshot;
 static uint32_t spectrum_last_status_tick;
+extern float dds_factor;
 
 static void Spectrum_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
 {
@@ -108,7 +111,7 @@ static void Spectrum_Backspace(void)
 
 static void Spectrum_ToggleNegativeInput(void)
 {
-  if (spectrum_snapshot.ui_focus != 10U)
+  if ((spectrum_snapshot.ui_focus != 4U) && (spectrum_snapshot.ui_focus != 10U))
   {
     return;
   }
@@ -241,12 +244,45 @@ static uint32_t Spectrum_ParseFrequencyHz(uint32_t value_x1000, uint8_t has_deci
   {
     frequency_hz = 1UL;
   }
-  else if (frequency_hz > 10000000UL)
-  {
-    frequency_hz = 10000000UL;
-  }
 
   return frequency_hz;
+}
+
+static uint32_t Spectrum_MaxFrequencyHz(uint8_t waveform)
+{
+  return (waveform == 0U) ? 20000000UL : 4000000UL;
+}
+
+static void Spectrum_ClampWaveFrequency(SpectrumWaveConfig *wave)
+{
+  uint32_t max_hz;
+
+  if (wave == 0)
+  {
+    return;
+  }
+
+  max_hz = Spectrum_MaxFrequencyHz(wave->waveform);
+  if (wave->frequency_hz < 1UL)
+  {
+    wave->frequency_hz = 1UL;
+  }
+  else if (wave->frequency_hz > max_hz)
+  {
+    wave->frequency_hz = max_hz;
+  }
+}
+
+static uint16_t Spectrum_NormalizePhaseDeg(int32_t phase_deg)
+{
+  int32_t normalized = phase_deg % 360;
+
+  if (normalized < 0)
+  {
+    normalized += 360;
+  }
+
+  return (uint16_t)normalized;
 }
 
 static void Spectrum_MoveFocusHorizontal(int8_t step)
@@ -313,6 +349,57 @@ static void Spectrum_SelectWave(uint8_t wave)
   }
 }
 
+static uint32_t Spectrum_DdsAmplitudeMvpp(uint16_t amplitude_code)
+{
+  uint32_t mvpp = ((uint32_t)amplitude_code * 780UL + 4095UL) / 8191UL;
+
+  if (mvpp > 780UL)
+  {
+    mvpp = 780UL;
+  }
+
+  return mvpp;
+}
+
+static void Spectrum_UpdateDdsSine(void)
+{
+  uint8_t count = spectrum_snapshot.wave_count;
+
+  if (count > SPECTRUM_SUM_MAX_WAVES)
+  {
+    count = SPECTRUM_SUM_MAX_WAVES;
+  }
+
+  for (uint8_t i = 0U; i < count; i++)
+  {
+    SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
+
+    if ((wave->enable != 0U) && (wave->waveform == 0U))
+    {
+      dds_output_sine(wave->frequency_hz,
+                      dds_factor,
+                      Spectrum_DdsAmplitudeMvpp(wave->amplitude_code));
+      return;
+    }
+  }
+
+  dds_output_sine(1000UL, dds_factor, 0UL);
+}
+
+static void Spectrum_SetLcrTestSignal(void)
+{
+  dds_output_sine(SPECTRUM_LCR_TEST_FREQ_HZ,
+                  dds_factor,
+                  Spectrum_DdsAmplitudeMvpp(SPECTRUM_LCR_TEST_AMP_CODE));
+}
+
+static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
+{
+  const uint64_t dds_clock_hz = 1000000000ULL;
+  return (uint32_t)((((uint64_t)frequency_hz << 32) + (dds_clock_hz / 2ULL)) /
+                    dds_clock_hz);
+}
+
 static void Spectrum_CommitInput(void)
 {
   uint8_t valid;
@@ -323,7 +410,9 @@ static void Spectrum_CommitInput(void)
   int32_t signed_value;
   SpectrumWaveConfig *wave = &spectrum_snapshot.waves[spectrum_snapshot.selected_wave];
 
-  if ((valid == 0U) && (spectrum_snapshot.ui_focus != 10U))
+  if ((valid == 0U) &&
+      (spectrum_snapshot.ui_focus != 4U) &&
+      (spectrum_snapshot.ui_focus != 10U))
   {
     Spectrum_CancelEdit();
     return;
@@ -349,9 +438,19 @@ static void Spectrum_CommitInput(void)
       break;
     case 3U:
       wave->frequency_hz = Spectrum_ParseFrequencyHz(value_x1000, has_decimal);
+      Spectrum_ClampWaveFrequency(wave);
       break;
     case 4U:
-      wave->phase_deg = (uint16_t)(value % 360UL);
+      signed_value_x1000 = Spectrum_ParseSignedInputX1000(&valid, &has_decimal);
+      if (valid == 0U)
+      {
+        Spectrum_CancelEdit();
+        return;
+      }
+      signed_value = (signed_value_x1000 >= 0) ?
+                     ((signed_value_x1000 + 500) / 1000) :
+                     ((signed_value_x1000 - 500) / 1000);
+      wave->phase_deg = Spectrum_NormalizePhaseDeg(signed_value);
       break;
     case 5U:
       if (value > 8191UL) { value = 8191UL; }
@@ -375,6 +474,7 @@ static void Spectrum_CommitInput(void)
     case 8U:
       if (value > 3UL) { value = 3UL; }
       wave->waveform = (uint8_t)value;
+      Spectrum_ClampWaveFrequency(wave);
       break;
     case 9U:
       wave->enable = (value != 0UL) ? 1U : 0U;
@@ -405,6 +505,7 @@ static void Spectrum_CommitInput(void)
 
   spectrum_snapshot.apply_counter++;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
+  Spectrum_UpdateDdsSine();
   Spectrum_CancelEdit();
 }
 
@@ -445,7 +546,7 @@ static void Spectrum_SendStatus(void)
 
 static void Spectrum_LoadDefaults(void)
 {
-  spectrum_snapshot.mode = 0U;
+  spectrum_snapshot.mode = SPECTRUM_MODE_SUM_WAVEFORM;
   spectrum_snapshot.state = SPECTRUM_HOST_READY;
   spectrum_snapshot.channel_id = 0U;
   spectrum_snapshot.wave_count = 2U;
@@ -463,7 +564,7 @@ static void Spectrum_LoadDefaults(void)
     spectrum_snapshot.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
     spectrum_snapshot.waves[i].offset_code = 0;
     spectrum_snapshot.waves[i].duty_code = 32768U;
-    spectrum_snapshot.waves[i].waveform = 0U;
+    spectrum_snapshot.waves[i].waveform = (i < 2U) ? 1U : 0U;
     spectrum_snapshot.waves[i].enable = (i < 2U) ? 1U : 0U;
   }
 }
@@ -471,6 +572,7 @@ static void Spectrum_LoadDefaults(void)
 void SpectrumSystem_Init(void)
 {
   Spectrum_LoadDefaults();
+  Spectrum_UpdateDdsSine();
   spectrum_last_status_tick = HAL_GetTick();
   Spectrum_SendStatus();
 }
@@ -478,6 +580,8 @@ void SpectrumSystem_Init(void)
 void SpectrumSystem_Task(void)
 {
   uint32_t now = HAL_GetTick();
+
+  AdcFftClient_Task();
   if ((now - spectrum_last_status_tick) >= 250UL)
   {
     spectrum_last_status_tick = now;
@@ -521,11 +625,33 @@ void SpectrumSystem_OnKey(char key)
   else if (key == 'A')
   {
     Spectrum_LoadDefaults();
+    Spectrum_UpdateDdsSine();
   }
   else if (key == 'B')
   {
-    spectrum_snapshot.apply_counter++;
     spectrum_snapshot.state = SPECTRUM_HOST_READY;
+    if (spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST)
+    {
+      spectrum_snapshot.mode = SPECTRUM_MODE_SUM_WAVEFORM;
+      Spectrum_UpdateDdsSine();
+    }
+    else
+    {
+      spectrum_snapshot.mode = SPECTRUM_MODE_LCR_TEST;
+      Spectrum_SetLcrTestSignal();
+    }
+  }
+  else if ((spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST) && (key == 'D'))
+  {
+    Spectrum_SetLcrTestSignal();
+    (void)AdcFftClient_RequestMeasurement(SPECTRUM_LCR_TEST_FREQ_HZ,
+                                          Spectrum_LcrDdsFtw(SPECTRUM_LCR_TEST_FREQ_HZ),
+                                          1000UL);
+    spectrum_snapshot.apply_counter++;
+    spectrum_snapshot.state = SPECTRUM_HOST_SENT;
+  }
+  else if (spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST)
+  {
   }
   else if (key == '4')
   {
