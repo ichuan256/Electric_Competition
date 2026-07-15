@@ -8,6 +8,12 @@
 #define FPGA_UART_CONTROL_REALTIME 0x00U
 #define FPGA_UART_CONTROL_CACHE    0x80U
 
+#define FPGA_UART_CMD_CHANNEL_STAGE 0x20U
+#define FPGA_UART_CMD_COMMIT        0x21U
+#define FPGA_UART_CMD_GET_STATUS    0x22U
+#define FPGA_UART_CMD_STATUS        0x23U
+#define FPGA_UART_CMD_ACK           0x7FU
+
 typedef struct {
   uint32_t frequency_hz;
   uint16_t phase_deg;
@@ -20,14 +26,20 @@ typedef struct {
 
 typedef struct {
   uint8_t last_cmd;
+  uint8_t last_rx_cmd;
   uint32_t last_data;
   uint8_t last_ack_cmd;
   uint8_t last_ack_status;
+  uint16_t last_ack_seq;
+  uint16_t last_transaction_id;
+  uint16_t applied_mask;
   uint8_t rx_value;
   uint8_t has_rx;
   uint32_t tx_count;
   uint32_t rx_count;
   uint32_t error_count;
+  uint32_t crc_error_count;
+  uint32_t parse_error_count;
   uint8_t dirty_mask;
   uint8_t queue_count;
   uint8_t queue_index;
@@ -43,6 +55,15 @@ typedef struct {
 
 void FpgaUart_Init(void);
 void FpgaUart_Task(void);
+
+/* Queue one FPGA_CHANNEL_STAGE followed by one FPGA_COMMIT. */
+void FpgaUart_SetMultiwaveTransaction(uint16_t transaction_id,
+                                      uint8_t channel_id, uint8_t wave_count,
+                                      const FpgaUartWaveConfig *waves,
+                                      int16_t offset_code, uint8_t control_flags,
+                                      uint16_t period_points, uint8_t commit_flags);
+
+/* Compatibility entry point for local/manual UI operations. */
 void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
                            const FpgaUartWaveConfig *waves,
                            int16_t offset_code, uint8_t control_flags,
