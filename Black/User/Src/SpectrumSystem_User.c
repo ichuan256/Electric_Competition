@@ -1,4 +1,6 @@
 #include "SpectrumSystem_User.h"
+#include "SpectrumDds_User.h"
+#include "SpectrumPhase_User.h"
 
 #include "AD9910_User.h"
 #include "BoardComm_User.h"
@@ -26,7 +28,6 @@ static uint8_t spectrum_lcr_request[SPECTRUM_LCR_EXCITATION_REQUEST_LEN];
 #define SPECTRUM_TARGET_FULL_SCALE_UVPP 600000ULL
 #define SPECTRUM_CH1_UI_MAX_MVPP 20000UL
 #define SPECTRUM_CH2_UI_MAX_MAPP 250UL
-#define SPECTRUM_DDS_GAIN_PPM 956700UL
 #define SPECTRUM_SOURCE_FLAG_DDS_BIAS_PRESENT 0x04U
 
 typedef struct {
@@ -542,33 +543,11 @@ static void Spectrum_SelectWave(uint8_t wave)
   }
 }
 
-static uint32_t Spectrum_DdsAmplitudeMvpp(uint16_t amplitude_code)
-{
-  uint32_t target_mvpp;
-  uint32_t command_mvpp;
-
-  if (amplitude_code > SPECTRUM_AMPLITUDE_CODE_MAX)
-  {
-    amplitude_code = SPECTRUM_AMPLITUDE_CODE_MAX;
-  }
-  target_mvpp = (uint32_t)((((uint64_t)amplitude_code *
-                             SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP) +
-                            (SPECTRUM_AMPLITUDE_CODE_MAX / 2U)) /
-                           SPECTRUM_AMPLITUDE_CODE_MAX);
-  command_mvpp = (uint32_t)((((uint64_t)target_mvpp * 1000000ULL) +
-                              (SPECTRUM_DDS_GAIN_PPM / 2UL)) /
-                             SPECTRUM_DDS_GAIN_PPM);
-  if (command_mvpp > SPECTRUM_LCR_AMPLITUDE_MAX_MVPP)
-  {
-    command_mvpp = SPECTRUM_LCR_AMPLITUDE_MAX_MVPP;
-  }
-
-  return command_mvpp;
-}
-
 static void Spectrum_UpdateDdsSine(void)
 {
   uint8_t count = spectrum_snapshot.wave_count;
+  uint8_t enabled_count = 0U;
+  SpectrumWaveConfig *dds_wave = 0;
 
   if (count > SPECTRUM_SUM_MAX_WAVES)
   {
@@ -579,14 +558,25 @@ static void Spectrum_UpdateDdsSine(void)
   {
     SpectrumWaveConfig *wave = &spectrum_snapshot.waves[i];
 
-    if ((wave->enable != 0U) && (wave->waveform == 0U))
+    if (wave->enable != 0U)
     {
-      dds_output_sine_phase(wave->frequency_hz,
-                            dds_factor,
-                            Spectrum_DdsAmplitudeMvpp(wave->amplitude_code),
-                            wave->phase_deg);
-      return;
+      enabled_count++;
+      if ((wave->waveform == 0U) && (dds_wave == 0))
+      {
+        dds_wave = wave;
+      }
     }
+  }
+
+  if (dds_wave != 0)
+  {
+    dds_output_sine_phase(
+        dds_wave->frequency_hz,
+        dds_factor,
+        SpectrumDds_AmplitudeCommandMvpp(dds_wave->amplitude_code,
+                                         (enabled_count == 1U) ? 1U : 0U),
+        SpectrumPhase_SineUiToDds(dds_wave->phase_deg));
+    return;
   }
 
   dds_output_sine(1000UL, dds_factor, 0UL);
