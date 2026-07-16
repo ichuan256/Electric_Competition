@@ -161,6 +161,12 @@ static void LcrAuto_ProcessSample(const LcrCaptureSample *sample)
     LcrAuto_Fail(LCR_AUTO_ERROR_IMPEDANCE_INVALID);
     return;
   }
+  if (LcrMath_DeembedParallelResistance(
+          impedance, LCR_DUT_PARALLEL_RESISTANCE_OHM, &impedance) == 0U)
+  {
+    LcrAuto_Fail(LCR_AUTO_ERROR_IMPEDANCE_INVALID);
+    return;
+  }
   (void)LcrCalibration_Apply((sample->frequency_hz != 0UL) ?
                              sample->frequency_hz :
                              lcr_auto_snapshot.actual_frequency_hz,

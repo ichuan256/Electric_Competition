@@ -39,6 +39,12 @@ uint8_t LcrMath_CalculateImpedance(LcrComplex vin, LcrComplex vr,
 uint8_t LcrMath_CalculateAdmittance(LcrComplex vin, LcrComplex vr,
                                     double reference_ohm,
                                     LcrComplex *admittance);
+uint8_t LcrMath_DeembedParallelResistance(LcrComplex measured_impedance,
+                                          double parallel_ohm,
+                                          LcrComplex *dut_impedance);
+uint8_t LcrMath_DeembedParallelResistanceAdmittance(
+    LcrComplex measured_admittance, double parallel_ohm,
+    LcrComplex *dut_admittance);
 LcrComponentType LcrMath_Classify(const LcrSweepPoint *points,
                                   uint8_t point_count,
                                   double *median_slope);

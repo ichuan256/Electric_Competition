@@ -48,6 +48,60 @@ static void test_impedance_round_trip(void)
                                         (expected.imag * expected.imag)), 1.0e-9));
 }
 
+static LcrComplex parallel_with_resistance(LcrComplex impedance,
+                                           double parallel_ohm)
+{
+  double denominator_real = parallel_ohm + impedance.real;
+  double denominator = (denominator_real * denominator_real) +
+                       (impedance.imag * impedance.imag);
+  LcrComplex result;
+
+  result.real = parallel_ohm *
+      ((impedance.real * denominator_real) +
+       (impedance.imag * impedance.imag)) / denominator;
+  result.imag = parallel_ohm * parallel_ohm * impedance.imag / denominator;
+  return result;
+}
+
+static void test_parallel_resistance_deembedding(void)
+{
+  const double shunt_ohm = 1000.0;
+  LcrComplex dut_cases[] = {
+    {470.0, 0.0},
+    {2.0, 2.0 * TEST_PI * 20000.0 * 0.01},
+    {1.0, -1.0 / (2.0 * TEST_PI * 1000.0 * 470.0e-9)},
+    {0.0, 0.0}
+  };
+
+  for (unsigned int i = 0U; i <
+       (sizeof(dut_cases) / sizeof(dut_cases[0])); i++)
+  {
+    LcrComplex measured = parallel_with_resistance(dut_cases[i], shunt_ohm);
+    LcrComplex actual = {0.0, 0.0};
+
+    assert(LcrMath_DeembedParallelResistance(measured, shunt_ohm,
+                                              &actual) != 0U);
+    assert(nearly_equal(actual.real, dut_cases[i].real, 1.0e-9));
+    assert(nearly_equal(actual.imag, dut_cases[i].imag, 1.0e-9));
+  }
+
+  {
+    LcrComplex measured_open_y = {1.0 / shunt_ohm, 2.5e-6};
+    LcrComplex dut_open_y = {1.0, 1.0};
+    assert(LcrMath_DeembedParallelResistanceAdmittance(
+               measured_open_y, shunt_ohm, &dut_open_y) != 0U);
+    assert(nearly_equal(dut_open_y.real, 0.0, 1.0e-12));
+    assert(nearly_equal(dut_open_y.imag, 2.5e-6, 1.0e-12));
+  }
+
+  {
+    LcrComplex measured_open_z = {shunt_ohm, 0.0};
+    LcrComplex unused;
+    assert(LcrMath_DeembedParallelResistance(measured_open_z, shunt_ohm,
+                                              &unused) == 0U);
+  }
+}
+
 static void make_points(LcrSweepPoint *points, LcrComponentType type)
 {
   static const uint32_t frequencies[10] = {
@@ -122,6 +176,7 @@ static void test_best_frequency_and_values(void)
 int main(void)
 {
   test_impedance_round_trip();
+  test_parallel_resistance_deembedding();
   test_auto_classification();
   test_best_frequency_and_values();
   puts("LcrMathTests: PASS");

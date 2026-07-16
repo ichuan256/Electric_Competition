@@ -414,6 +414,12 @@ static void LcrCal_ProcessSample(const LcrCaptureSample *sample)
       LcrCal_Fail(LCR_CAL_RESULT_MATH);
       return;
     }
+    if (LcrMath_DeembedParallelResistanceAdmittance(
+            raw_y, LCR_DUT_PARALLEL_RESISTANCE_OHM, &raw_y) == 0U)
+    {
+      LcrCal_Fail(LCR_CAL_RESULT_MATH);
+      return;
+    }
     if (LcrCal_Reciprocal(raw_y, &raw_z) == 0U)
     {
       value.real = value.imag = 0.0;
@@ -439,6 +445,12 @@ static void LcrCal_ProcessSample(const LcrCaptureSample *sample)
     }
     if (LcrMath_CalculateImpedance(sample->vin, sample->vr,
                                    lcr_cal_staging.reference_ohm, &value) == 0U)
+    {
+      LcrCal_Fail(LCR_CAL_RESULT_MATH);
+      return;
+    }
+    if (LcrMath_DeembedParallelResistance(
+            value, LCR_DUT_PARALLEL_RESISTANCE_OHM, &value) == 0U)
     {
       LcrCal_Fail(LCR_CAL_RESULT_MATH);
       return;

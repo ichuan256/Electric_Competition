@@ -7,6 +7,9 @@
 #define LCR_AUTO_COARSE_POINT_COUNT 10U
 #define LCR_AUTO_FINE_AVERAGE_COUNT 8U
 
+/* Permanently fitted between V1 and V2, in parallel with the DUT. */
+#define LCR_DUT_PARALLEL_RESISTANCE_OHM 1000.0
+
 #define LCR_CAPTURE_STATUS_VALID       0x0001U
 #define LCR_CAPTURE_STATUS_OVERRANGE   0x0002U
 #define LCR_CAPTURE_STATUS_LOW_SNR     0x0004U

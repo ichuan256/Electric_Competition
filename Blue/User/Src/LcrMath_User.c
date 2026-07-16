@@ -104,6 +104,53 @@ uint8_t LcrMath_CalculateAdmittance(LcrComplex vin, LcrComplex vr,
   return 1U;
 }
 
+uint8_t LcrMath_DeembedParallelResistance(LcrComplex measured_impedance,
+                                          double parallel_ohm,
+                                          LcrComplex *dut_impedance)
+{
+  double denominator_real;
+  double denominator;
+
+  if ((dut_impedance == 0) || (parallel_ohm <= 0.0))
+  {
+    return 0U;
+  }
+
+  /* Zmeas = Zdut || Rparallel, therefore Zdut = Rparallel*Zmeas /
+   * (Rparallel-Zmeas). This form also preserves a true short (Zmeas=0). */
+  denominator_real = parallel_ohm - measured_impedance.real;
+  denominator = (denominator_real * denominator_real) +
+                (measured_impedance.imag * measured_impedance.imag);
+  if (denominator <= LCR_MATH_MIN_MAGNITUDE)
+  {
+    return 0U;
+  }
+
+  dut_impedance->real = parallel_ohm *
+      ((measured_impedance.real * denominator_real) -
+       (measured_impedance.imag * measured_impedance.imag)) / denominator;
+  dut_impedance->imag = parallel_ohm * parallel_ohm *
+      measured_impedance.imag / denominator;
+  return 1U;
+}
+
+uint8_t LcrMath_DeembedParallelResistanceAdmittance(
+    LcrComplex measured_admittance, double parallel_ohm,
+    LcrComplex *dut_admittance)
+{
+  if ((dut_admittance == 0) || (parallel_ohm <= 0.0))
+  {
+    return 0U;
+  }
+
+  /* Parallel branches add in admittance. This representation remains valid
+   * for the OPEN calibration standard where the resulting DUT admittance is
+   * ideally zero and its impedance would be infinite. */
+  dut_admittance->real = measured_admittance.real - (1.0 / parallel_ohm);
+  dut_admittance->imag = measured_admittance.imag;
+  return 1U;
+}
+
 LcrComponentType LcrMath_Classify(const LcrSweepPoint *points,
                                   uint8_t point_count,
                                   double *median_slope)
