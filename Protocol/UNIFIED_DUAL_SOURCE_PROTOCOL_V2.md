@@ -403,6 +403,38 @@ status/error -> response FIFO -> UART TX
 
 ## 11. LCR 测量协议
 
+### 11.0 本机 AUTO 测量控制分工
+
+本机测量时由 Blue 作为 LCR 主控：Blue 控制扫频状态机、同步 ADC 采集、复数阻抗计算、自动判型、精测平均和 LCD 显示；Black 只执行 AD9910 激励设置并转发键盘事件。两路 ADC 原始数组不得通过板间 UART 传输。
+
+Blue 本地采样固定映射为 `P1-9/PC0/ADC1_IN10=Vin`、`P1-8/PC1/ADC2_IN11=Vr`，由 TIM6 TRGO 同时触发并通过 DMA 保存4096组打包数据。PC0 不再承担对数检波输入；旧 `F9 26` ADC帧和 `0x40/0x41` 对数检波请求/响应实现均退出当前 Black↔Blue 运行解析器。
+
+`CMD=0x40～0x47` 保留给上位机测量控制、状态和结果扩展。本机 LCD 测量不依赖 `MEASURE_RESULT 0x42`，而使用下面的板间激励握手。
+
+#### LCR_EXCITATION_SET - `CMD=0x48`，Blue→Black
+
+| 偏移 | 类型 | 字段 | 说明 |
+|---:|---|---|---|
+| 0 | u16 | `request_id` | 激励请求号 |
+| 2 | u32 | `frequency_hz` | 目标频率，当前允许 1 kHz～1 MHz |
+| 6 | u16 | `amplitude_mVpp` | AD9910 模块输出峰峰值 |
+| 8 | i32 | `phase_mdeg` | 相位，0.001° |
+| 12 | u8 | `enable` | 0=关闭，1=输出正弦 |
+| 13 | u8 | `reserved` | 固定 0 |
+| 14 | u16 | `settle_us` | Blue 在收到 READY 后等待的稳定时间 |
+
+#### LCR_EXCITATION_READY - `CMD=0x49`，Black→Blue
+
+| 偏移 | 类型 | 字段 | 说明 |
+|---:|---|---|---|
+| 0 | u16 | `request_id` | 回显请求号 |
+| 2 | u8 | `result` | 0=成功，1=长度错误，2=参数越界 |
+| 3 | u8 | `reserved` | 固定 0 |
+| 4 | u32 | `actual_ftw` | 实际写入 AD9910 的 FTW |
+| 8 | u32 | `actual_frequency_cHz` | 由 FTW 反算的实际频率，0.01 Hz |
+
+Black 必须在主循环中执行 AD9910 配置，UART 中断回调只复制请求，不得在中断中操作 DDS 或阻塞发送。Blue 必须使用 `actual_frequency_cHz` 进行相量拟合和 L/C 换算。
+
 ### 11.1 MEASURE_START - `CMD=0x40`
 
 | 偏移 | 类型 | 字段 | 说明 |

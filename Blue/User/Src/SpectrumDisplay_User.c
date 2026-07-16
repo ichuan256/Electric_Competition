@@ -1,10 +1,12 @@
 #include "SpectrumDisplay_User.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "BoardComm_User.h"
-#include "AdcFftProtocol_User.h"
 #include "FpgaUart_User.h"
+#include "LcrAuto_User.h"
+#include "LcrDualAdc_User.h"
 #include "lcd.h"
 #include "led.h"
 
@@ -21,11 +23,6 @@
 #define DISPLAY_TABLE_ROWS        5U
 #define DISPLAY_INFO_Y            268U
 #define DISPLAY_INFO_LINE_GAP     20U
-#define DISPLAY_LCR_FREQ_HZ       1000000UL
-#define DISPLAY_LCR_DDS_CLK_HZ    1000000000ULL
-#define DISPLAY_LCR_ADC_FS_HZ     2500000UL
-#define DISPLAY_LCR_FFT_LEN       4096UL
-#define DISPLAY_LCR_SETTLE_US     1000UL
 #define DISPLAY_FPGA_SAMPLE_HZ    100000000UL
 #define DISPLAY_FPGA_POINTS_MIN   16UL
 #define DISPLAY_FPGA_POINTS_MAX   4096UL
@@ -48,13 +45,7 @@ static uint32_t display_last_fpga_rx_count = 0xFFFFFFFFUL;
 static uint32_t display_last_fpga_error_count = 0xFFFFFFFFUL;
 static uint8_t display_last_fpga_ack_cmd = 0xFFU;
 static uint8_t display_last_fpga_ack_status = 0xFFU;
-static uint32_t display_last_fft_rx_count = 0xFFFFFFFFUL;
-static uint32_t display_last_fft_error_count = 0xFFFFFFFFUL;
-static uint8_t display_last_fft_has_result = 0xFFU;
-static uint8_t display_last_fft_seq = 0xFFU;
-static uint32_t display_lcr_last_ftw = 0UL;
-static uint64_t display_lcr_last_frequency_mHz = 0ULL;
-static uint16_t display_lcr_last_bin = 0U;
+static uint32_t display_last_lcr_revision = 0xFFFFFFFFUL;
 
 typedef struct {
   uint16_t transaction_id;
@@ -331,32 +322,6 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
   }
 
   return 0x05U;
-}
-
-static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
-{
-  uint64_t scaled = ((uint64_t)frequency_hz << 32) + (DISPLAY_LCR_DDS_CLK_HZ / 2ULL);
-  return (uint32_t)(scaled / DISPLAY_LCR_DDS_CLK_HZ);
-}
-
-static uint64_t Spectrum_LcrFrequencyMilliHz(uint32_t ftw)
-{
-  uint64_t scaled = ((uint64_t)ftw * DISPLAY_LCR_DDS_CLK_HZ * 1000ULL) + (1ULL << 31);
-  return scaled >> 32;
-}
-
-static uint16_t Spectrum_LcrTargetBin(uint64_t frequency_mHz)
-{
-  uint64_t numerator = (frequency_mHz * DISPLAY_LCR_FFT_LEN) +
-                       (((uint64_t)DISPLAY_LCR_ADC_FS_HZ * 1000ULL) / 2ULL);
-  uint64_t bin = numerator / ((uint64_t)DISPLAY_LCR_ADC_FS_HZ * 1000ULL);
-
-  if (bin > 2048ULL)
-  {
-    bin = 2048ULL;
-  }
-
-  return (uint16_t)bin;
 }
 
 static const char *Spectrum_StateText(uint8_t state)
@@ -636,10 +601,6 @@ static void Spectrum_LoadDefaults(void)
   display_state.fpga_output_mode = 0U;
   display_state.last_key = '-';
   display_state.last_key_ascii = 0U;
-  display_lcr_last_ftw = Spectrum_LcrDdsFtw(DISPLAY_LCR_FREQ_HZ);
-  display_lcr_last_frequency_mHz = Spectrum_LcrFrequencyMilliHz(display_lcr_last_ftw);
-  display_lcr_last_bin = Spectrum_LcrTargetBin(display_lcr_last_frequency_mHz);
-
   for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
   {
     display_state.waves[i].frequency_hz = 1000000UL + (uint32_t)i * 100000UL;
@@ -777,76 +738,129 @@ static void Spectrum_DrawInfo(void)
                   464U, 16U, 16U, line, BLACK);
 }
 
+static const char *Spectrum_LcrAdcErrorText(LcrDualAdcErrorSource source)
+{
+  switch (source)
+  {
+    case LCR_DUAL_ADC_ERROR_NONE: return "NONE";
+    case LCR_DUAL_ADC_ERROR_TIMER_CONFIG: return "TMR_CFG";
+    case LCR_DUAL_ADC_ERROR_DMA_START: return "DMA_START";
+    case LCR_DUAL_ADC_ERROR_TIMER_START: return "TMR_START";
+    case LCR_DUAL_ADC_ERROR_ADC_IRQ: return "ADC_IRQ";
+    case LCR_DUAL_ADC_ERROR_CAPTURE_TIMEOUT: return "TIMEOUT";
+    case LCR_DUAL_ADC_ERROR_FIT: return "FIT";
+    default: return "?";
+  }
+}
+
 static void Spectrum_DrawLcrPage(void)
 {
   char line[64];
-  AdcFftProtocolState adc_fft = AdcFftProtocol_GetState();
-  AdcFftMeasurementResult result = adc_fft.last_result;
+  LcrAutoSnapshot lcr = LcrAuto_GetSnapshot();
+  LcrDualAdcSnapshot adc = LcrDualAdc_GetSnapshot();
+  BoardComm_State board = BoardComm_GetState();
 
   lcd_fill(0U, 0U, 479U, 319U, WHITE);
-  lcd_show_string(8U, 8U, 360U, 24U, 24U, "LCR ADC FFT TEST", RED);
+  lcd_show_string(8U, 8U, 360U, 24U, 24U, "LCR AUTO", RED);
   lcd_show_string(8U, 34U, 460U, 16U, 16U,
-                  "B back   D measure   DDS: 1MHz sine, no DC offset",
+                  "B back   D start   Blue ADC processing -> LCD",
                   GRAY);
 
-  lcd_draw_rectangle(8U, 58U, 471U, 146U, BLACK);
+  lcd_draw_rectangle(8U, 58U, 471U, 132U, BLACK);
   lcd_fill(9U, 59U, 470U, 80U, LGRAY);
-  lcd_show_string(16U, 62U, 430U, 16U, 16U, "REQUEST", BLACK);
-  snprintf(line, sizeof(line), "FREQ: 1.000000MHz   BIN:%u   SETTLE:%luus",
-           display_lcr_last_bin,
-           (unsigned long)DISPLAY_LCR_SETTLE_US);
-  lcd_show_string(16U, 88U, 440U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "FTW: 0x%08lX   ACT:%lu.%06luMHz",
-           (unsigned long)display_lcr_last_ftw,
-           (unsigned long)(display_lcr_last_frequency_mHz / 1000000000ULL),
-           (unsigned long)((display_lcr_last_frequency_mHz / 1000ULL) % 1000000ULL));
-  lcd_show_string(16U, 112U, 440U, 16U, 16U, line, BLACK);
+  lcd_show_string(16U, 62U, 430U, 16U, 16U, "AUTO PROGRESS", BLACK);
+  snprintf(line, sizeof(line), "STATE:%-10s  TYPE:%s  HW:%s",
+           LcrAuto_StateText(lcr.state),
+           LcrAuto_ComponentText(lcr.type),
+           (lcr.hardware_ready != 0U) ? "READY" : "NEED 2ADC");
+  lcd_show_string(16U, 86U, 440U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "F:%luHz  COARSE:%u/%u  AVG:%u/%u",
+           (unsigned long)lcr.requested_frequency_hz,
+           (unsigned int)((lcr.coarse_index < LCR_AUTO_COARSE_POINT_COUNT) ?
+                          (lcr.coarse_index + 1U) : LCR_AUTO_COARSE_POINT_COUNT),
+           (unsigned int)LCR_AUTO_COARSE_POINT_COUNT,
+           (unsigned int)lcr.fine_count,
+           (unsigned int)LCR_AUTO_FINE_AVERAGE_COUNT);
+  lcd_show_string(16U, 108U, 440U, 16U, 16U, line, BLACK);
 
-  lcd_draw_rectangle(8U, 158U, 471U, 278U, BLACK);
-  lcd_fill(9U, 159U, 470U, 180U, LGRAY);
-  lcd_show_string(16U, 162U, 430U, 16U, 16U, "SINE FIT RESULT", BLACK);
-  snprintf(line, sizeof(line), "SEQ:%u SW:%u PT:%u BIN:%u/%u STAT:0x%04X",
-           adc_fft.last_seq,
-           result.sweep_id,
-           result.point_id,
-           result.main_bin,
-           result.target_bin,
-           result.status);
-  lcd_show_string(16U, 188U, 440U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "RMS:%lu.%03lumV",
-           (unsigned long)(result.voltage_uv_rms / 1000UL),
-           (unsigned long)(result.voltage_uv_rms % 1000UL));
-  lcd_show_string(16U, 212U, 220U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "PEAK:%lu.%03lumV",
-           (unsigned long)(result.voltage_uv_peak / 1000UL),
-           (unsigned long)(result.voltage_uv_peak % 1000UL));
-  lcd_show_string(240U, 212U, 220U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "F:%luHz FS:%luHz ADC:%u..%u",
-           (unsigned long)result.main_frequency_hz,
-           (unsigned long)result.sample_rate_hz,
-           result.adc_min_code,
-           result.adc_max_code);
-  lcd_show_string(16U, 236U, 440U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "MIN:%ldmV MAX:%ldmV VPP:%lumV",
-           (long)(result.voltage_uv_min / 1000L),
-           (long)(result.voltage_uv_max / 1000L),
-           (unsigned long)(result.voltage_uv_pp / 1000UL));
-  lcd_show_string(16U, 260U, 440U, 16U, 16U, line, BLACK);
+  lcd_draw_rectangle(8U, 144U, 471U, 268U, BLACK);
+  lcd_fill(9U, 145U, 470U, 168U, LGRAY);
+  lcd_show_string(16U, 148U, 430U, 16U, 16U, "RESULT", BLACK);
 
-  snprintf(line, sizeof(line), "ADC FIT CMD:%02X TX:%lu RX:%lu ERR:%lu BUSY:%lu STATE:%u",
-           adc_fft.last_cmd,
-           (unsigned long)adc_fft.tx_count,
-           (unsigned long)adc_fft.rx_count,
-           (unsigned long)adc_fft.error_count,
-           (unsigned long)adc_fft.busy_count,
-           (unsigned int)AdcFftMeasure_GetState());
-  lcd_show_string(8U, 284U, 464U, 16U, 16U, line, BLACK);
-  snprintf(line, sizeof(line), "KEY:%c  BOARD RX:%lu ERR:%lu  UART ERR:%lu",
+  if (lcr.result_valid != 0U)
+  {
+    if (lcr.type == LCR_COMPONENT_R)
+    {
+      snprintf(line, sizeof(line), "R = %lu.%03lu ohm",
+               (unsigned long)(lcr.impedance_mohm / 1000UL),
+               (unsigned long)(lcr.impedance_mohm % 1000UL));
+    }
+    else if (lcr.type == LCR_COMPONENT_L)
+    {
+      snprintf(line, sizeof(line), "L = %lu.%03lu uH",
+               (unsigned long)(lcr.inductance_nh / 1000ULL),
+               (unsigned long)(lcr.inductance_nh % 1000ULL));
+    }
+    else
+    {
+      snprintf(line, sizeof(line), "C = %lu.%03lu pF",
+               (unsigned long)(lcr.capacitance_ff / 1000ULL),
+               (unsigned long)(lcr.capacitance_ff % 1000ULL));
+    }
+    lcd_show_string(16U, 178U, 430U, 24U, 24U, line, RED);
+    snprintf(line, sizeof(line), "Z:%lu.%03luohm  PH:%ld.%03lddeg",
+             (unsigned long)(lcr.impedance_mohm / 1000UL),
+             (unsigned long)(lcr.impedance_mohm % 1000UL),
+             (long)(lcr.phase_mdeg / 1000L),
+             (long)labs(lcr.phase_mdeg % 1000L));
+    lcd_show_string(16U, 212U, 440U, 16U, 16U, line, BLACK);
+    snprintf(line, sizeof(line), "Rs:%ldmohm X:%ldmohm Q:%lu.%03lu",
+             (long)lcr.resistance_mohm,
+             (long)lcr.reactance_mohm,
+             (unsigned long)(lcr.quality_factor_x1000 / 1000UL),
+             (unsigned long)(lcr.quality_factor_x1000 % 1000UL));
+    lcd_show_string(16U, 238U, 440U, 16U, 16U, line, BLACK);
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "STATUS: %s", LcrAuto_ErrorText(lcr.error));
+    lcd_show_string(16U, 176U, 440U, 24U, 24U, line,
+                    (lcr.state == LCR_AUTO_ERROR) ? RED : BLACK);
+    snprintf(line, sizeof(line), "RAW R:%u V1:%u..%u V2:%u..%u",
+             (unsigned int)adc.raw_valid,
+             (unsigned int)adc.vin_min_code,
+             (unsigned int)adc.vin_max_code,
+             (unsigned int)adc.vr_min_code,
+             (unsigned int)adc.vr_max_code);
+    lcd_show_string(16U, 207U, 440U, 16U, 16U, line, BLACK);
+    snprintf(line, sizeof(line), "FIT:%lu/%luuV ST:%04X FS:%lu",
+             (unsigned long)adc.vin_peak_uv,
+             (unsigned long)adc.vr_peak_uv,
+             (unsigned int)adc.last_status,
+             (unsigned long)adc.sample_rate_hz);
+    lcd_show_string(16U, 227U, 440U, 16U, 16U, line, BLACK);
+    snprintf(line, sizeof(line), "SRC:%s H:%lX D:%lX ND:%lu C:%u E:%u",
+             Spectrum_LcrAdcErrorText(adc.error_source),
+             (unsigned long)adc.last_hal_error,
+             (unsigned long)adc.last_dma_error,
+             (unsigned long)adc.dma_remaining,
+             (unsigned int)adc.frame_complete,
+             (unsigned int)adc.irq_error_seen);
+    lcd_show_string(16U, 247U, 440U, 16U, 16U, line, BLACK);
+  }
+
+  snprintf(line, sizeof(line), "KEY:%c BOARD RX:%lu ERR:%lu FTW:%08lX",
            display_state.last_key,
-           (unsigned long)display_state.rx_count,
-           (unsigned long)display_state.error_count,
-           (unsigned long)adc_fft.crc_error_count);
-  lcd_show_string(8U, 304U, 464U, 16U, 16U, line, BLACK);
+           (unsigned long)board.rx_count,
+           (unsigned long)board.error_count,
+           (unsigned long)lcr.dds_ftw);
+  lcd_show_string(8U, 276U, 464U, 16U, 16U, line, BLACK);
+  snprintf(line, sizeof(line), "MEAS:%u START:%lu DONE:%lu ERR:%lu",
+           lcr.measurement_id,
+           (unsigned long)lcr.start_count,
+           (unsigned long)lcr.completed_count,
+           (unsigned long)lcr.error_count);
+  lcd_show_string(8U, 296U, 464U, 16U, 16U, line, BLACK);
 }
 
 static void Spectrum_DrawScreen(void)
@@ -891,6 +905,15 @@ void SpectrumDisplay_Task(void)
   {
     display_state.last_key = key;
     display_state.last_key_ascii = (uint8_t)key;
+    if ((key == 'D') &&
+        (display_state.mode == SPECTRUM_DISPLAY_MODE_LCR_TEST))
+    {
+      (void)LcrAuto_Start();
+    }
+    else if (key == 'B')
+    {
+      LcrAuto_Cancel();
+    }
     if ((key == 'C') && (display_state.ui_editing == 0U))
     {
       Spectrum_SendSumToFpga();
@@ -939,17 +962,10 @@ void SpectrumDisplay_Task(void)
   }
 
   {
-    AdcFftProtocolState fft_state = AdcFftProtocol_GetState();
-    uint8_t has_result = (fft_state.last_result.status != 0U) ? 1U : 0U;
-    if ((fft_state.rx_count != display_last_fft_rx_count) ||
-        (fft_state.error_count != display_last_fft_error_count) ||
-        (has_result != display_last_fft_has_result) ||
-        (fft_state.last_seq != display_last_fft_seq))
+    LcrAutoSnapshot lcr = LcrAuto_GetSnapshot();
+    if (lcr.revision != display_last_lcr_revision)
     {
-      display_last_fft_rx_count = fft_state.rx_count;
-      display_last_fft_error_count = fft_state.error_count;
-      display_last_fft_has_result = has_result;
-      display_last_fft_seq = fft_state.last_seq;
+      display_last_lcr_revision = lcr.revision;
       display_info_refresh_requested = 1U;
     }
   }

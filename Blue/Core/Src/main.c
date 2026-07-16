@@ -31,11 +31,12 @@
 #include "mpu.h"
 #include "Delay.h"
 #include "BoardComm_User.h"
-#include "AdcFftMeasure_User.h"
-#include "AdcFftProtocol_User.h"
+#include "LcrAuto_User.h"
+#include "LcrDualAdc_User.h"
+#include "LcrCalibration_User.h"
+#include "UsbCdc_User.h"
 #include "SpectrumDisplay_User.h"
 #include "AGC_DAC_User.h"
-#include "LogDetector_User.h"
 #include "FpgaUart_User.h"
 /* USER CODE END Includes */
 
@@ -178,10 +179,11 @@ int main(void)
   mpu_memory_protection();
   lcd_init();
   (void)AGC_DAC_Init();
-  AdcFftMeasure_Init();
-  LogDetector_Init();
+  LcrDualAdc_Init();
+  LcrAuto_Init();
+  LcrCalibration_Init();
+  (void)UsbCdc_Init();
   BoardComm_Init();
-  AdcFftProtocol_Init(&huart1);
   (void)BoardComm_StartReceiveToIdleIT();
   FpgaUart_Init();
 	
@@ -200,7 +202,10 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     BoardComm_ProcessTask();
-    AdcFftProtocol_Task();
+    LcrAuto_Task();
+    LcrCalibration_Task();
+    LcrCalibration_UsbTask();
+    UsbCdc_Task();
     FpgaUart_Task();
     SpectrumDisplay_Task();
     HAL_Delay(10);

@@ -1,7 +1,6 @@
 #include "SpectrumSystem_User.h"
 
 #include "AD9910_User.h"
-#include "AdcFftClient_User.h"
 #include "BoardComm_User.h"
 
 static SpectrumHostSnapshot spectrum_snapshot;
@@ -10,6 +9,16 @@ static uint8_t spectrum_last_source_result = 0xFFU;
 static uint8_t spectrum_source_apply_seen = 0xFFU;
 static uint16_t spectrum_source_transaction;
 extern float dds_factor;
+
+#define SPECTRUM_LCR_EXCITATION_REQUEST_LEN 16U
+#define SPECTRUM_LCR_EXCITATION_READY_LEN   12U
+#define SPECTRUM_LCR_FREQUENCY_MIN_HZ        100UL
+#define SPECTRUM_LCR_FREQUENCY_MAX_HZ       1000000UL
+#define SPECTRUM_LCR_AMPLITUDE_MAX_MVPP     780U
+
+static volatile uint8_t spectrum_lcr_request_pending;
+static volatile uint8_t spectrum_lcr_request_len;
+static uint8_t spectrum_lcr_request[SPECTRUM_LCR_EXCITATION_REQUEST_LEN];
 
 #define SPECTRUM_CHANNEL_COUNT 2U
 #define SPECTRUM_AMPLITUDE_CODE_MAX 8191U
@@ -122,6 +131,19 @@ static void Spectrum_WriteU32(uint8_t *buf, uint8_t *pos, uint32_t value)
   buf[(*pos)++] = (uint8_t)((value >> 8) & 0xFFUL);
   buf[(*pos)++] = (uint8_t)((value >> 16) & 0xFFUL);
   buf[(*pos)++] = (uint8_t)((value >> 24) & 0xFFUL);
+}
+
+static uint16_t Spectrum_ReadU16(const uint8_t *buf)
+{
+  return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+}
+
+static uint32_t Spectrum_ReadU32(const uint8_t *buf)
+{
+  return (uint32_t)buf[0] |
+         ((uint32_t)buf[1] << 8) |
+         ((uint32_t)buf[2] << 16) |
+         ((uint32_t)buf[3] << 24);
 }
 
 static void Spectrum_SendSourceTransaction(void)
@@ -532,18 +554,97 @@ static void Spectrum_UpdateDdsSine(void)
   dds_output_sine(1000UL, dds_factor, 0UL);
 }
 
-static void Spectrum_SetLcrTestSignal(void)
-{
-  dds_output_sine(SPECTRUM_LCR_TEST_FREQ_HZ,
-                  dds_factor,
-                  Spectrum_DdsAmplitudeMvpp(SPECTRUM_LCR_TEST_AMP_CODE));
-}
-
 static uint32_t Spectrum_LcrDdsFtw(uint32_t frequency_hz)
 {
   const uint64_t dds_clock_hz = 1000000000ULL;
   return (uint32_t)((((uint64_t)frequency_hz << 32) + (dds_clock_hz / 2ULL)) /
                     dds_clock_hz);
+}
+
+static void Spectrum_ProcessLcrExcitationRequest(void)
+{
+  uint8_t request[SPECTRUM_LCR_EXCITATION_REQUEST_LEN];
+  uint8_t response[SPECTRUM_LCR_EXCITATION_READY_LEN];
+  uint8_t length;
+  uint8_t position = 0U;
+  uint8_t result = 0U;
+  uint16_t request_id = 0U;
+  uint32_t frequency_hz = 0UL;
+  uint16_t amplitude_mvpp = 0U;
+  int32_t phase_mdeg = 0L;
+  uint16_t phase_deg = 0U;
+  uint8_t enable = 0U;
+  uint32_t ftw = 0UL;
+  uint32_t actual_frequency_chz = 0UL;
+
+  if (spectrum_lcr_request_pending == 0U)
+  {
+    return;
+  }
+
+  __disable_irq();
+  length = spectrum_lcr_request_len;
+  for (uint8_t i = 0U;
+       (i < length) && (i < SPECTRUM_LCR_EXCITATION_REQUEST_LEN);
+       i++)
+  {
+    request[i] = spectrum_lcr_request[i];
+  }
+  spectrum_lcr_request_pending = 0U;
+  __enable_irq();
+
+  if (length >= 2U)
+  {
+    request_id = Spectrum_ReadU16(&request[0]);
+  }
+  if (length != SPECTRUM_LCR_EXCITATION_REQUEST_LEN)
+  {
+    result = 1U;
+  }
+  else
+  {
+    frequency_hz = Spectrum_ReadU32(&request[2]);
+    amplitude_mvpp = Spectrum_ReadU16(&request[6]);
+    phase_mdeg = (int32_t)Spectrum_ReadU32(&request[8]);
+    enable = request[12];
+    if ((frequency_hz < SPECTRUM_LCR_FREQUENCY_MIN_HZ) ||
+        (frequency_hz > SPECTRUM_LCR_FREQUENCY_MAX_HZ) ||
+        (amplitude_mvpp > SPECTRUM_LCR_AMPLITUDE_MAX_MVPP) ||
+        (enable > 1U))
+    {
+      result = 2U;
+    }
+  }
+
+  if (result == 0U)
+  {
+    int32_t rounded_phase = (phase_mdeg >= 0L) ?
+                            ((phase_mdeg + 500L) / 1000L) :
+                            ((phase_mdeg - 500L) / 1000L);
+    phase_deg = Spectrum_NormalizePhaseDeg(rounded_phase);
+    if (enable != 0U)
+    {
+      dds_output_sine_phase(frequency_hz, dds_factor,
+                            amplitude_mvpp, phase_deg);
+    }
+    else
+    {
+      dds_output_sine(1000UL, dds_factor, 0UL);
+    }
+    ftw = Spectrum_LcrDdsFtw(frequency_hz);
+    actual_frequency_chz = (uint32_t)((((uint64_t)ftw * 100000000000ULL) +
+                                       (1ULL << 31)) >> 32);
+  }
+
+  Spectrum_WriteU16(response, &position, request_id);
+  response[position++] = result;
+  response[position++] = 0U;
+  Spectrum_WriteU32(response, &position, ftw);
+  Spectrum_WriteU32(response, &position, actual_frequency_chz);
+  (void)BoardComm_SendV2(BOARD_COMM_NODE_BLUE,
+                         BOARD_COMM_CMD_LCR_EXCITATION_READY,
+                         BOARD_COMM_FLAG_RESPONSE,
+                         request_id, response, position);
 }
 
 static void Spectrum_CommitInput(void)
@@ -716,6 +817,8 @@ void SpectrumSystem_Init(void)
   spectrum_last_source_result = 0xFFU;
   spectrum_source_apply_seen = 0xFFU;
   spectrum_source_transaction = 0U;
+  spectrum_lcr_request_pending = 0U;
+  spectrum_lcr_request_len = 0U;
   Spectrum_UpdateDdsSine();
   spectrum_last_status_tick = HAL_GetTick();
   Spectrum_SendStatus();
@@ -725,7 +828,7 @@ void SpectrumSystem_Task(void)
 {
   uint32_t now = HAL_GetTick();
 
-  AdcFftClient_Task();
+  Spectrum_ProcessLcrExcitationRequest();
   if ((now - spectrum_last_status_tick) >= 250UL)
   {
     spectrum_last_status_tick = now;
@@ -735,7 +838,24 @@ void SpectrumSystem_Task(void)
 
 void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, BoardComm_Status status)
 {
-  if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_ACK) &&
+  if ((status == BOARD_COMM_OK) &&
+      (cmd == BOARD_COMM_CMD_LCR_EXCITATION_SET) &&
+      (data != 0))
+  {
+    uint8_t copy_len = len;
+    if (copy_len > SPECTRUM_LCR_EXCITATION_REQUEST_LEN)
+    {
+      copy_len = SPECTRUM_LCR_EXCITATION_REQUEST_LEN;
+    }
+    for (uint8_t i = 0U; i < copy_len; i++)
+    {
+      spectrum_lcr_request[i] = data[i];
+    }
+    spectrum_lcr_request_len = len;
+    __DMB();
+    spectrum_lcr_request_pending = 1U;
+  }
+  else if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_ACK) &&
       (data != 0) && (len >= 8U) &&
       (data[0] == BOARD_COMM_CMD_SOURCE_COMMIT))
   {
@@ -790,17 +910,11 @@ void SpectrumSystem_OnKey(char key)
     else
     {
       spectrum_snapshot.mode = SPECTRUM_MODE_LCR_TEST;
-      Spectrum_SetLcrTestSignal();
     }
   }
   else if ((spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST) && (key == 'D'))
   {
-    Spectrum_SetLcrTestSignal();
-    (void)AdcFftClient_RequestMeasurement(SPECTRUM_LCR_TEST_FREQ_HZ,
-                                          Spectrum_LcrDdsFtw(SPECTRUM_LCR_TEST_FREQ_HZ),
-                                          1000UL);
-    spectrum_snapshot.apply_counter++;
-    spectrum_snapshot.state = SPECTRUM_HOST_SENT;
+    /* Blue owns the AUTO LCR state machine and requests each AD9910 point. */
   }
   else if (spectrum_snapshot.mode == SPECTRUM_MODE_LCR_TEST)
   {

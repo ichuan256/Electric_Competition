@@ -341,7 +341,7 @@
               <MiscControls></MiscControls>
               <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H750xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Core/BSP/LCD;../Core/BSP/LED;../User/Inc;../Core/BSP/MPU</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Core/BSP/LCD;../Core/BSP/LED;../User/Inc;../Core/BSP/MPU;../Middlewares/USB/STM32_USB_Device_Library/Core/Inc;../Middlewares/USB/STM32_USB_Device_Library/Class/CDC/Inc;../Middlewares/USB/USB_APP</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -451,24 +451,34 @@
               <FilePath>../User/Src/SpectrumDisplay_User.c</FilePath>
             </File>
             <File>
-              <FileName>LogDetector_User.c</FileName>
+              <FileName>LcrMath_User.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../User/Src/LogDetector_User.c</FilePath>
+              <FilePath>../User/Src/LcrMath_User.c</FilePath>
+            </File>
+            <File>
+              <FileName>LcrAuto_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/LcrAuto_User.c</FilePath>
+            </File>
+            <File>
+              <FileName>LcrDualAdc_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/LcrDualAdc_User.c</FilePath>
+            </File>
+            <File>
+              <FileName>LcrCalibration_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/LcrCalibration_User.c</FilePath>
+            </File>
+            <File>
+              <FileName>UsbCdc_User.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../User/Src/UsbCdc_User.c</FilePath>
             </File>
             <File>
               <FileName>FpgaUart_User.c</FileName>
               <FileType>1</FileType>
               <FilePath>../User/Src/FpgaUart_User.c</FilePath>
-            </File>
-            <File>
-              <FileName>AdcFftMeasure_User.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../User/Src/AdcFftMeasure_User.c</FilePath>
-            </File>
-            <File>
-              <FileName>AdcFftProtocol_User.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../User/Src/AdcFftProtocol_User.c</FilePath>
             </File>
             <File>
               <FileName>mpu.c</FileName>
@@ -490,6 +500,21 @@
         <Group>
           <GroupName>Drivers/STM32H7xx_HAL_Driver</GroupName>
           <Files>
+            <File>
+              <FileName>stm32h7xx_hal_pcd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_pcd.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_hal_pcd_ex.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_pcd_ex.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32h7xx_ll_usb.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_usb.c</FilePath>
+            </File>
             <File>
               <FileName>stm32h7xx_hal_cortex.c</FileName>
               <FileType>1</FileType>
@@ -634,6 +659,41 @@
               <FileName>stm32h7xx_hal_uart_ex.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_uart_ex.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Middlewares/USB</GroupName>
+          <Files>
+            <File>
+              <FileName>usbd_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/STM32_USB_Device_Library/Core/Src/usbd_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_ctlreq.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_ioreq.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_cdc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_conf.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/USB_APP/usbd_conf.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_desc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/USB/USB_APP/usbd_desc.c</FilePath>
             </File>
           </Files>
         </Group>

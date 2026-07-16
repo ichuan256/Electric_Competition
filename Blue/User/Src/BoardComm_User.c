@@ -1,7 +1,7 @@
 #include "BoardComm_User.h"
 #include "SpectrumDisplay_User.h"
-#include "AdcFftProtocol_User.h"
-#include "LogDetector_User.h"
+#include "LcrAuto_User.h"
+#include "LcrCalibration_User.h"
 
 static UART_HandleTypeDef *board_comm_uart = &huart1;
 static uint8_t board_comm_rx_buf[BOARD_COMM_RX_BUF_SIZE];
@@ -13,10 +13,6 @@ static uint8_t board_comm_parsed_flags;
 static uint16_t board_comm_parsed_seq;
 
 #define BOARD_COMM_QUEUE_DEPTH 8U
-#define BOARD_COMM_ADC_FFT_HEADER_LEN     9U
-#define BOARD_COMM_ADC_FFT_OVERHEAD       13U
-#define BOARD_COMM_ADC_FFT_MAX_FRAME_LEN  49U
-
 typedef enum {
   BOARD_COMM_FRAME_NO_MATCH = 0,
   BOARD_COMM_FRAME_READY,
@@ -79,14 +75,6 @@ static uint16_t BoardComm_Crc16(const uint8_t *data, uint16_t len)
   }
 
   return crc;
-}
-
-static uint16_t BoardComm_ReadU16(const uint8_t *buf, uint8_t *pos)
-{
-  uint16_t value = (uint16_t)buf[*pos];
-  value |= (uint16_t)buf[(uint8_t)(*pos + 1U)] << 8;
-  *pos = (uint8_t)(*pos + 2U);
-  return value;
 }
 
 static void BoardComm_WriteU16(uint8_t *buf, uint8_t *pos, uint16_t value)
@@ -262,38 +250,8 @@ static void BoardComm_DispatchStandardFrame(const uint8_t *frame, uint16_t frame
   BoardComm_StoreRxFrame(cmd, data, len, status);
 }
 
-static BoardComm_FrameProbeResult BoardComm_ProbeAdcFftFrame(const uint8_t *data,
-                                                              uint16_t available,
-                                                              uint16_t *frame_size)
-{
-  uint16_t payload_len;
-
-  if (AdcFftProtocol_IsFrameStart(data, available) == 0U)
-  {
-    return BOARD_COMM_FRAME_NO_MATCH;
-  }
-  if (available < BOARD_COMM_ADC_FFT_HEADER_LEN)
-  {
-    return BOARD_COMM_FRAME_INCOMPLETE;
-  }
-
-  payload_len = (uint16_t)data[7] | ((uint16_t)data[8] << 8);
-  *frame_size = (uint16_t)(BOARD_COMM_ADC_FFT_OVERHEAD + payload_len);
-  if (*frame_size > BOARD_COMM_ADC_FFT_MAX_FRAME_LEN)
-  {
-    return BOARD_COMM_FRAME_INVALID;
-  }
-  return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
-}
-
-static void BoardComm_DispatchAdcFftFrame(const uint8_t *frame, uint16_t frame_size)
-{
-  (void)AdcFftProtocol_HandleRxBuffer(frame, frame_size);
-}
-
 static const BoardComm_FrameDecoder board_comm_frame_decoders[] = {
-  {BoardComm_ProbeStandardFrame, BoardComm_DispatchStandardFrame},
-  {BoardComm_ProbeAdcFftFrame, BoardComm_DispatchAdcFftFrame}
+  {BoardComm_ProbeStandardFrame, BoardComm_DispatchStandardFrame}
 };
 
 void BoardComm_Init(void)
@@ -461,27 +419,11 @@ void BoardComm_ProcessTask(void)
   {
     /* KEY_EVENT is already captured by BoardComm_StoreRxFrame(). */
   }
-  else if ((status == BOARD_COMM_OK) && (cmd == BOARD_COMM_CMD_ADC_SAMPLE_REQ))
+  else if ((status == BOARD_COMM_OK) &&
+           (cmd == BOARD_COMM_CMD_LCR_EXCITATION_READY))
   {
-    uint8_t pos = 0;
-    uint8_t resp_pos = 0;
-    uint8_t response[7];
-    uint16_t point_index = 0;
-    LogDetectorSample sample;
-
-    if (len >= 10U)
-    {
-      point_index = BoardComm_ReadU16(data_copy, &pos);
-    }
-
-    sample = LogDetector_ReadAverage(LOG_DETECTOR_DEFAULT_AVG_COUNT);
-    BoardComm_WriteU16(response, &resp_pos, point_index);
-    BoardComm_WriteU16(response, &resp_pos, sample.mv);
-    BoardComm_WriteU16(response, &resp_pos, (uint16_t)sample.dbm_x10);
-    response[resp_pos++] = sample.valid;
-
-    (void)BoardComm_SendV2(src, BOARD_COMM_CMD_ADC_SAMPLE_RESP,
-                           BOARD_COMM_FLAG_RESPONSE, seq, response, resp_pos);
+    LcrAuto_HandleExcitationReady(data_copy, len);
+    LcrCalibration_HandleExcitationReady(data_copy, len);
   }
   else if ((status == BOARD_COMM_OK) &&
            ((cmd == BOARD_COMM_CMD_SOURCE_STAGE) ||

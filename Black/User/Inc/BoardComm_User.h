@@ -93,6 +93,8 @@
  */
 #define BOARD_COMM_CMD_ADC_SAMPLE_REQ   0x40U
 #define BOARD_COMM_CMD_ADC_SAMPLE_RESP  0x41U
+#define BOARD_COMM_CMD_LCR_EXCITATION_SET   0x48U
+#define BOARD_COMM_CMD_LCR_EXCITATION_READY 0x49U
 
 /*
  * ���ͨ�ź�������ֵ��

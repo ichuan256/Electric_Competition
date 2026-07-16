@@ -27,7 +27,6 @@
 /* USER CODE BEGIN Includes */
 #include "AD9910_User.h"
 #include "ADF4351_User.h"
-#include "AdcFftClient_User.h"
 #include "BoardComm_User.h"
 #include "Keypad_User.h"
 #include "SpectrumSystem_User.h"
@@ -52,7 +51,7 @@
 
 /* USER CODE BEGIN PV */
 extern uint8_t dds_mode;
-// DDS校准因子，不校准时为1
+// DDS鏍″噯鍥犲瓙锛屼笉鏍″噯鏃朵负1
 extern float dds_factor;
 
 double Hz=900;
@@ -101,7 +100,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  //ADF4351_Init(350);																									// ???ó?????
+  //ADF4351_Init(350);																									// ???贸?????
 
   /* USER CODE END SysInit */
 
@@ -114,7 +113,6 @@ int main(void)
   //ADF4351_SetFreq(2000);
 	Delay_Init();
   BoardComm_Init();
-  AdcFftClient_Init();
   (void)BoardComm_StartReceiveToIdleIT();
   Keypad_Init();
 	AD9910_Init_1();
