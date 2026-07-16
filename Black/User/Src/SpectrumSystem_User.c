@@ -22,8 +22,12 @@ static uint8_t spectrum_lcr_request[SPECTRUM_LCR_EXCITATION_REQUEST_LEN];
 
 #define SPECTRUM_CHANNEL_COUNT 2U
 #define SPECTRUM_AMPLITUDE_CODE_MAX 8191U
-#define SPECTRUM_AMPLITUDE_PEAK_MAX_MV 3500UL
-#define SPECTRUM_OUTPUT_FULL_SCALE_UVPP 7000000ULL
+#define SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP 600UL
+#define SPECTRUM_TARGET_FULL_SCALE_UVPP 600000ULL
+#define SPECTRUM_CH1_UI_MAX_MVPP 20000UL
+#define SPECTRUM_CH2_UI_MAX_MAPP 250UL
+#define SPECTRUM_DDS_GAIN_PPM 956700UL
+#define SPECTRUM_SOURCE_FLAG_DDS_BIAS_PRESENT 0x04U
 
 typedef struct {
   uint8_t wave_count;
@@ -35,15 +39,34 @@ typedef struct {
 
 static SpectrumChannelProfile spectrum_channel_profiles[SPECTRUM_CHANNEL_COUNT];
 
-static uint16_t Spectrum_AmplitudeMvToCode(uint32_t amplitude_mv)
+static uint16_t Spectrum_AmplitudeMvppToCode(uint32_t amplitude_mvpp)
 {
-  if (amplitude_mv > SPECTRUM_AMPLITUDE_PEAK_MAX_MV)
+  if (amplitude_mvpp > SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP)
   {
-    amplitude_mv = SPECTRUM_AMPLITUDE_PEAK_MAX_MV;
+    amplitude_mvpp = SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP;
   }
 
-  return (uint16_t)(((uint64_t)amplitude_mv * SPECTRUM_AMPLITUDE_CODE_MAX) /
-                    SPECTRUM_AMPLITUDE_PEAK_MAX_MV);
+  return (uint16_t)(((uint64_t)amplitude_mvpp * SPECTRUM_AMPLITUDE_CODE_MAX) /
+                    SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP);
+}
+
+static uint32_t Spectrum_AmplitudeUiMaximum(uint8_t channel_id)
+{
+  return (channel_id == 0U) ? SPECTRUM_CH1_UI_MAX_MVPP :
+                              SPECTRUM_CH2_UI_MAX_MAPP;
+}
+
+static uint16_t Spectrum_AmplitudeUiToCode(uint8_t channel_id,
+                                           uint32_t ui_value)
+{
+  uint32_t ui_maximum = Spectrum_AmplitudeUiMaximum(channel_id);
+
+  if (ui_value > ui_maximum)
+  {
+    ui_value = ui_maximum;
+  }
+  return (uint16_t)(((uint64_t)ui_value * SPECTRUM_AMPLITUDE_CODE_MAX) /
+                    ui_maximum);
 }
 
 static uint32_t Spectrum_AmplitudeCodeToUvpp(uint16_t amplitude_code)
@@ -53,7 +76,7 @@ static uint32_t Spectrum_AmplitudeCodeToUvpp(uint16_t amplitude_code)
     amplitude_code = SPECTRUM_AMPLITUDE_CODE_MAX;
   }
 
-  return (uint32_t)((((uint64_t)amplitude_code * SPECTRUM_OUTPUT_FULL_SCALE_UVPP) +
+  return (uint32_t)((((uint64_t)amplitude_code * SPECTRUM_TARGET_FULL_SCALE_UVPP) +
                      (SPECTRUM_AMPLITUDE_CODE_MAX / 2U)) /
                     SPECTRUM_AMPLITUDE_CODE_MAX);
 }
@@ -110,7 +133,8 @@ static void Spectrum_InitChannelProfiles(void)
     {
       profile->waves[i].frequency_hz = 1000000UL + ((uint32_t)i * 100000UL);
       profile->waves[i].phase_deg = 0U;
-      profile->waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
+      profile->waves[i].amplitude_code =
+          (i < 2U) ? Spectrum_AmplitudeMvppToCode(500UL) : 0U;
       profile->waves[i].offset_code = 0;
       profile->waves[i].duty_code = 32768U;
       profile->waves[i].waveform = (i < 2U) ? 1U : 0U;
@@ -162,8 +186,10 @@ static void Spectrum_SendSourceTransaction(void)
   payload[pos++] = (enabled != 0U) ? 1U : 0U;
   payload[pos++] = (spectrum_snapshot.fpga_output_mode != 0U) ? 2U : 1U;
   payload[pos++] = spectrum_snapshot.wave_count;
+  /* ASF=0 does not remove the measured AD9910 module DC bias, so the bias is
+   * present whenever this permanently connected analog path is powered. */
   payload[pos++] = 0U;
-  payload[pos++] = 0U;
+  payload[pos++] = SPECTRUM_SOURCE_FLAG_DDS_BIAS_PRESENT;
   Spectrum_WriteU32(payload, &pos, (uint32_t)((int32_t)spectrum_snapshot.output_bias_mv * 1000));
   Spectrum_WriteU16(payload, &pos, 0U);
   Spectrum_WriteU16(payload, &pos, 1000U);
@@ -188,7 +214,7 @@ static void Spectrum_SendSourceTransaction(void)
   pos = 0U;
   Spectrum_WriteU16(payload, &pos, transaction_id);
   payload[pos++] = (uint8_t)(1U << spectrum_snapshot.channel_id);
-  payload[pos++] = 0x09U;
+  payload[pos++] = 0x08U;
   Spectrum_WriteU32(payload, &pos, 0UL);
   (void)BoardComm_SendV2(BOARD_COMM_NODE_BLUE, BOARD_COMM_CMD_SOURCE_COMMIT,
                          BOARD_COMM_FLAG_ACK_REQ, (uint16_t)(transaction_id + 1U), payload, pos);
@@ -518,14 +544,26 @@ static void Spectrum_SelectWave(uint8_t wave)
 
 static uint32_t Spectrum_DdsAmplitudeMvpp(uint16_t amplitude_code)
 {
-  uint32_t mvpp = ((uint32_t)amplitude_code * 780UL + 4095UL) / 8191UL;
+  uint32_t target_mvpp;
+  uint32_t command_mvpp;
 
-  if (mvpp > 780UL)
+  if (amplitude_code > SPECTRUM_AMPLITUDE_CODE_MAX)
   {
-    mvpp = 780UL;
+    amplitude_code = SPECTRUM_AMPLITUDE_CODE_MAX;
+  }
+  target_mvpp = (uint32_t)((((uint64_t)amplitude_code *
+                             SPECTRUM_TARGET_AMPLITUDE_MAX_MVPP) +
+                            (SPECTRUM_AMPLITUDE_CODE_MAX / 2U)) /
+                           SPECTRUM_AMPLITUDE_CODE_MAX);
+  command_mvpp = (uint32_t)((((uint64_t)target_mvpp * 1000000ULL) +
+                              (SPECTRUM_DDS_GAIN_PPM / 2UL)) /
+                             SPECTRUM_DDS_GAIN_PPM);
+  if (command_mvpp > SPECTRUM_LCR_AMPLITUDE_MAX_MVPP)
+  {
+    command_mvpp = SPECTRUM_LCR_AMPLITUDE_MAX_MVPP;
   }
 
-  return mvpp;
+  return command_mvpp;
 }
 
 static void Spectrum_UpdateDdsSine(void)
@@ -707,11 +745,12 @@ static void Spectrum_CommitInput(void)
       wave->phase_deg = Spectrum_NormalizePhaseDeg(signed_value);
       break;
     case 5U:
-      if (value > SPECTRUM_AMPLITUDE_PEAK_MAX_MV)
+      if (value > Spectrum_AmplitudeUiMaximum(spectrum_snapshot.channel_id))
       {
-        value = SPECTRUM_AMPLITUDE_PEAK_MAX_MV;
+        value = Spectrum_AmplitudeUiMaximum(spectrum_snapshot.channel_id);
       }
-      wave->amplitude_code = Spectrum_AmplitudeMvToCode(value);
+      wave->amplitude_code = Spectrum_AmplitudeUiToCode(
+          spectrum_snapshot.channel_id, value);
       break;
     case 6U:
       if (value > 8191UL) { value = 8191UL; }
