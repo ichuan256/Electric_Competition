@@ -1,6 +1,6 @@
 // DAC1四槽位多波形叠加器。TYPE: 0关闭、1方波、2三角波、3锯齿波。
 // 三角波和锯齿波使用phase[31:20]，即4096个相位位置。
-// 按系统设计约定不做饱和限幅，由MCU保证最终和在-8192..8191内。
+// 四路乘法后使用19位累加，并在输出端饱和到14位补码范围。
 module ad9744_multiwave_mixer (
     input  wire         clk,
     input  wire         rst_n,
@@ -11,7 +11,9 @@ module ad9744_multiwave_mixer (
     input  wire [55:0]  amp_flat,
     input  wire [63:0]  duty_flat,
     input  wire signed [13:0] dc_offset,
-    output reg [13:0] dac_data
+    output reg [13:0] dac_data,
+    output reg        clipping,
+    output reg [31:0] clip_count
 );
     reg [31:0] phase_acc [0:3];
     reg signed [13:0] raw [0:3];
@@ -76,6 +78,8 @@ module ad9744_multiwave_mixer (
             sum23 <= 18'sd0;
             mix_sum <= 19'sd0;
             dac_data <= 14'd0;
+            clipping <= 1'b0;
+            clip_count <= 32'd0;
         end else if (restart) begin
             // 原子提交配置时清空全部相位和流水级，四槽位同步从零相位启动。
             for (i=0; i<4; i=i+1) begin
@@ -88,6 +92,7 @@ module ad9744_multiwave_mixer (
             sum23 <= 18'sd0;
             mix_sum <= 19'sd0;
             dac_data <= 14'd0;
+            clipping <= 1'b0;
         end else begin
             phase_acc[0] <= phase_acc[0] + ftw_flat[31:0];
             phase_acc[1] <= phase_acc[1] + ftw_flat[63:32];
@@ -108,13 +113,18 @@ module ad9744_multiwave_mixer (
             sum01 <= scaled[0] + scaled[1];
             sum23 <= scaled[2] + scaled[3];
             mix_sum <= sum01 + sum23 + dc_offset;
-            // 有意不饱和：MCU必须保证mix_sum位于14位补码有效范围。
-            if (mix_sum > 19'sd8191)
+            if (mix_sum > 19'sd8191) begin
                 dac_data <= 14'h1FFF;
-            else if (mix_sum < -19'sd8192)
+                clipping <= 1'b1;
+                if (clip_count!=32'hFFFFFFFF) clip_count<=clip_count+1'b1;
+            end else if (mix_sum < -19'sd8192) begin
                 dac_data <= 14'h2000;
-            else
+                clipping <= 1'b1;
+                if (clip_count!=32'hFFFFFFFF) clip_count<=clip_count+1'b1;
+            end else begin
                 dac_data <= mix_sum[13:0];
+                clipping <= 1'b0;
+            end
         end
     end
 endmodule
@@ -133,6 +143,10 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     output reg  frame_ok_toggle,
     output reg  cfg0_toggle,
     output reg  cfg1_toggle,
+    output reg  commit_toggle,
+    output reg  [1:0] commit_mask,
+    output reg  [3:0] commit_flags,
+    input  wire commit_applied_toggle,
     output reg  [7:0]   type0_flat,
     output reg  [127:0] ftw0_flat,
     output reg  [127:0] phase0_flat,
@@ -251,6 +265,14 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
     reg [7:0] last_src,last_cmd,last_status,last_flags;
     reg [15:0] last_seq,last_detail,last_transaction,last_mask;
 
+    // COMMIT通过共享令牌送入100 MHz采样域；收到采样域回执后才返回ACK。
+    reg commit_response_waiting;
+    reg commit_applied_seen;
+    reg [7:0] commit_response_dst;
+    reg [15:0] commit_response_seq;
+    reg [15:0] commit_response_transaction;
+    reg [15:0] commit_response_mask;
+
     reg staged0_valid,staged1_valid;
     reg [15:0] staged0_transaction,staged1_transaction;
     reg [7:0] shadow0_type,shadow1_type;
@@ -334,6 +356,10 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
             last_seq<=0; last_status<=0; last_flags<=0; last_detail<=0;
             last_transaction<=0; last_mask<=0;
             cfg0_toggle<=0; cfg1_toggle<=0;
+            commit_toggle<=0; commit_mask<=0; commit_flags<=0;
+            commit_response_waiting<=0; commit_applied_seen<=0;
+            commit_response_dst<=0; commit_response_seq<=0;
+            commit_response_transaction<=0; commit_response_mask<=0;
             type0_flat<=8'h02; ftw0_flat<={96'd0,32'd42_949_673};
             phase0_flat<=0; amp0_flat<={42'd0,14'd8191};
             duty0_flat<={4{16'h8000}}; offset0<=0;
@@ -354,6 +380,28 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
             staged0_transaction<=0; staged1_transaction<=0;
         end else begin
             tx_start<=1'b0;
+
+            if (commit_response_waiting &&
+                (commit_applied_toggle!=commit_applied_seen)) begin
+                commit_applied_seen<=commit_applied_toggle;
+                commit_response_waiting<=1'b0;
+                response_dst<=commit_response_dst;
+                response_flags<=FLAG_RESPONSE;
+                response_seq<=commit_response_seq;
+                response_request_cmd<=CMD_COMMIT;
+                response_status<=ST_OK;
+                response_detail<=16'd0;
+                response_transaction<=commit_response_transaction;
+                response_mask<=commit_response_mask;
+                response_pending<=1'b1;
+                response_index<=0;
+                last_response_valid<=1'b1;
+                last_src<=NODE_BLUE; last_cmd<=CMD_COMMIT;
+                last_seq<=commit_response_seq; last_status<=ST_OK;
+                last_flags<=FLAG_RESPONSE; last_detail<=0;
+                last_transaction<=commit_response_transaction;
+                last_mask<=commit_response_mask;
+            end
 
             if (rx_valid) begin
                 activity<=~activity;
@@ -496,7 +544,9 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
                                 end else if (req_cmd==CMD_COMMIT) begin
                                     transaction_temp={payload[1],payload[0]};
                                     if ((payload_len!=4)||(payload[2]==0)||((payload[2]&8'hFC)!=0)||
-                                        ((payload[3]&8'hF0)!=0)) begin
+                                        ((payload[3]&8'hF0)!=0)||
+                                        ((payload[2]==8'h03)&&!payload[3][1])||
+                                        ((payload[2]!=8'h03)&&payload[3][1])) begin
                                         prepare_response(req_cmd,ST_BAD_FIELD,0,transaction_temp,0);
                                     end else if (((payload[2]&1)&&(!staged0_valid||(staged0_transaction!=transaction_temp)))||
                                                  ((payload[2]&2)&&(!staged1_valid||(staged1_transaction!=transaction_temp)))) begin
@@ -518,7 +568,16 @@ module uart_v2_dual_config #(parameter CLK_HZ=50_000_000, BAUD=115_200) (
                                             enable1<=shadow1_enable; cfg1_toggle<=~cfg1_toggle;
                                             staged1_valid<=0;
                                         end
-                                        prepare_response(req_cmd,ST_OK,0,transaction_temp,{8'd0,payload[2]});
+                                        // active配置总线先稳定，再翻转唯一提交令牌。bit0由采样域
+                                        // 决定是否清零相位；bit1已在上方按双通道语义校验。
+                                        commit_mask<=payload[2][1:0];
+                                        commit_flags<=payload[3][3:0];
+                                        commit_toggle<=~commit_toggle;
+                                        commit_response_waiting<=1'b1;
+                                        commit_response_dst<=req_src;
+                                        commit_response_seq<=req_seq;
+                                        commit_response_transaction<=transaction_temp;
+                                        commit_response_mask<={8'd0,payload[2]};
                                     end
                                 end else begin
                                     prepare_response(req_cmd,ST_BAD_COMMAND,0,0,0);
@@ -562,7 +621,9 @@ module ad9744_period_cache (
     input  wire [63:0]  duty_flat,
     input  wire signed [13:0] dc_offset,
     output reg          cache_active,
-    output reg [13:0]   dac_data
+    output reg [13:0]   dac_data,
+    output reg          clipping,
+    output reg [31:0]   clip_count
 );
     (* ram_style = "block" *) reg [13:0] cache_ram0 [0:4095];
     (* ram_style = "block" *) reg [13:0] cache_ram1 [0:4095];
@@ -670,6 +731,7 @@ module ad9744_period_cache (
             active_points<=0; build_points<=0; read_addr<=0; build_addr<=0;
             build_slot<=0; build_stage<=0; point_sum<=0;
             build_raw<=0; build_product<=0;
+            clipping<=0; clip_count<=0;
             for (j=0;j<4;j=j+1) build_phase[j]<=0;
         end else begin
             // 同步读缓存；稳定运行时地址在0..active_points-1之间循环。
@@ -692,6 +754,7 @@ module ad9744_period_cache (
 
             if (restart) begin
                 build_busy<=0; swap_pending<=0; preload_pending<=0;
+                clipping<=0; clip_count<=0;
                 if (!enable_request) begin
                     cache_active<=0;
                     read_addr<=0;
@@ -717,6 +780,11 @@ module ad9744_period_cache (
                     // 第三拍完成缩放、累加或BRAM写入。
                     build_stage<=0;
                     if (build_slot==3) begin
+                        if ((completed_point>20'sd8191)||
+                            (completed_point< -20'sd8192)) begin
+                            clipping<=1'b1;
+                            if (clip_count!=32'hFFFFFFFF) clip_count<=clip_count+1'b1;
+                        end
                         build_slot<=0; point_sum<=0;
                         if (({1'b0,build_addr}+13'd1)>=build_points) begin
                             build_busy<=0;

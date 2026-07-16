@@ -29,6 +29,15 @@ module tb_ad9744_dds_top;
     integer tx_payload_len;
     reg cfg0_toggle_before;
     reg cfg1_toggle_before;
+    reg phase_reset0_seen;
+    reg phase_reset1_seen;
+    reg update0_seen;
+    reg update1_seen;
+    realtime update0_time;
+    realtime update1_time;
+    wire [13:0] clip_test_data;
+    wire clip_test_flag;
+    wire [31:0] clip_test_count;
 
     ad9744_dds_top dut (
         .sys_clk(sys_clk),
@@ -44,6 +53,16 @@ module tb_ad9744_dds_top;
         .dac2_sleep(dac2_sleep),
         .led0(led0),
         .led1(led1)
+    );
+
+    // 两个静态满幅方波同相叠加，验证宽位累加后饱和而不是14位回绕。
+    ad9744_multiwave_mixer clip_test_mixer (
+        .clk(sys_clk), .rst_n(sys_rst_n), .restart(1'b0),
+        .type_flat(8'h05), .ftw_flat(128'd0), .phase_flat(128'd0),
+        .amp_flat({28'd0,14'd8191,14'd8191}),
+        .duty_flat({4{16'h8000}}), .dc_offset(14'sd0),
+        .dac_data(clip_test_data), .clipping(clip_test_flag),
+        .clip_count(clip_test_count)
     );
 
     task uart_send_byte;
@@ -132,6 +151,13 @@ module tb_ad9744_dds_top;
     always @(negedge mcu_uart_txd)
         if (sys_rst_n) ack_seen = 1'b1;
 
+    always @(posedge dut.sample_clk) begin
+        if (dut.mix_phase_reset) phase_reset0_seen = 1'b1;
+        if (dut.mix1_phase_reset) phase_reset1_seen = 1'b1;
+        if (dut.mix_update) begin update0_seen = 1'b1; update0_time = $realtime; end
+        if (dut.mix1_update) begin update1_seen = 1'b1; update1_time = $realtime; end
+    end
+
     initial begin
         sys_rst_n    = 1'b0;
         key1_n       = 1'b1;
@@ -145,6 +171,12 @@ module tb_ad9744_dds_top;
         dac2_high_samples = 0;
         dac2_low_samples = 0;
         ack_seen = 1'b0;
+        phase_reset0_seen = 1'b0;
+        phase_reset1_seen = 1'b0;
+        update0_seen = 1'b0;
+        update1_seen = 1'b0;
+        update0_time = 0.0;
+        update1_time = 0.0;
 
         #200;
         sys_rst_n = 1'b1;
@@ -164,6 +196,8 @@ module tb_ad9744_dds_top;
             $fatal(1, "DAC 数据始终未变化");
         if ((dac2_high_samples == 0) || (dac2_low_samples == 0))
             $fatal(1, "DAC2默认方波没有完成高低电平切换");
+        if ((clip_test_count==0)||(clip_test_data!==14'h1FFF))
+            $fatal(1,"多分量过量程没有正确饱和并累计clipping计数");
 
         dac2_check_enable = 1'b0;
 
@@ -185,7 +219,9 @@ module tb_ad9744_dds_top;
 
         // V2 COMMIT：只有此帧成功后DAC2才切换。
         tx_payload_len=4; tx_payload[0]=8'h34; tx_payload[1]=8'h12;
-        tx_payload[2]=8'h02; tx_payload[3]=8'h09;
+        // 普通单通道提交使用0x08：应用配置但保持连续相位。
+        phase_reset1_seen=1'b0;
+        tx_payload[2]=8'h02; tx_payload[3]=8'h08;
         uart_send_v2(8'h21,16'h0003,1'b0);
         #2500000;
         if ((dut.mix1_type[1:0]!==2'd3)||(dut.mix1_ftw[31:0]!==32'd42_949_673)||
@@ -195,6 +231,8 @@ module tb_ad9744_dds_top;
             $fatal(1,"DAC2事务错误修改了DAC1");
         if ((dut.u_mix_uart.response_status!==8'h00)||(dut.u_mix_uart.response_mask!==16'h0002))
             $fatal(1,"DAC2 COMMIT应答的applied_mask错误");
+        if (phase_reset1_seen)
+            $fatal(1,"普通0x08 COMMIT错误清零了DAC2相位累加器");
 
         // 同一事务分别暂存两路，再用mask=3原子提交。
         tx_payload_len=26;
@@ -213,6 +251,9 @@ module tb_ad9744_dds_top;
 
         tx_payload_len=4; tx_payload[0]=8'h22; tx_payload[1]=8'h22;
         tx_payload[2]=8'h03; tx_payload[3]=8'h0B;
+        phase_reset0_seen=1'b0; phase_reset1_seen=1'b0;
+        update0_seen=1'b0; update1_seen=1'b0;
+        update0_time=0.0; update1_time=0.0;
         uart_send_v2(8'h21,16'h0006,1'b0); #2500000;
         if ((dut.mix_type[1:0]!==2'd1)||(dut.mix1_type[1:0]!==2'd2))
             $fatal(1,"双通道COMMIT波形路由错误");
@@ -221,6 +262,10 @@ module tb_ad9744_dds_top;
             $fatal(1,"双通道COMMIT频率配置错误");
         if (dut.u_mix_uart.response_mask!==16'h0003)
             $fatal(1,"双通道COMMIT没有返回applied_mask=3");
+        if (!update0_seen || !update1_seen || (update0_time!=update1_time))
+            $fatal(1,"双通道配置没有在同一个采样边沿原子切换");
+        if (!phase_reset0_seen || !phase_reset1_seen)
+            $fatal(1,"0x0B同步提交没有同时清零两路相位累加器");
 
         // ACK丢失时Blue会用同一SEQ重发；重复COMMIT只能重发响应，不能再次切相位。
         cfg0_toggle_before=dut.u_mix_uart.cfg0_toggle;

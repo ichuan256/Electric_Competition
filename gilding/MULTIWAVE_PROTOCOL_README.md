@@ -33,8 +33,23 @@ REQUEST_CMD STATUS DETAIL_L DETAIL_H TRANSACTION_L TRANSACTION_H MASK_L MASK_H
 暂存ACK；活动波形不变。`COMMIT`要求mask中的所有通道均已用同一transaction_id
 暂存，否则返回 `NOT_STAGED(0x09)`。
 
-当mask为 `0x03` 时，DAC1和DAC2的配置翻转握手在同一个系统时钟周期产生，并在
-共享100 MHz采样时钟域同步捕获。两路实时混合器的相位累加器在同一采样边沿重启。
+所有COMMIT通过一个共享提交令牌跨入100 MHz采样时钟域。mask为 `0x03` 时要求
+`commit_flags.bit1=1`，DAC1和DAC2配置在同一个采样边沿原子切换；采样域完成应用
+并返回翻转回执后，UART解析器才发送ACK。
+
+`commit_flags`语义：
+
+| 位 | 含义 |
+|---:|---|
+| bit0 | 显式同步启动，清零mask目标通道的全部相位累加器 |
+| bit1 | 双通道原子切换，仅与mask=`0x03`配合使用 |
+| bit2 | CACHE提交标志，保留现有缓存构建语义 |
+| bit3 | 提交失败保持旧输出 |
+
+普通单通道提交使用 `0x08`，双通道连续相位原子提交使用 `0x0A`，双通道同步清相位
+使用 `0x0B`。普通幅值、偏置、占空比、波形或相位偏置更新不会再清零连续相位累加器。
+`bit4` 的DDS硬件同步脉冲尚未启用，因为它必须与Black/Blue的DDS_ARMED流程和
+AD9910 I/O_UPDATE硬件线同时升级，不能只在FPGA单边实现。
 
 两路均支持：
 
@@ -43,6 +58,8 @@ REQUEST_CMD STATUS DETAIL_L DETAIL_H TRANSACTION_L TRANSACTION_H MASK_L MASK_H
 - 16～4096点周期缓存模式；
 - 独立FTW、相位、幅度、占空比和14位补码偏置；
 - 四槽宽位累加后饱和到 `-8192..8191`，不再补码回绕。
+- 实时和缓存引擎均产生clipping标志及32位饱和计数器，当前作为MARK_DEBUG信号
+  保留，可在Vivado Hardware Manager/ILA中观测。
 
 ## 波形映射
 

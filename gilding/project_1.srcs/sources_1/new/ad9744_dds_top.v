@@ -50,6 +50,10 @@ module ad9744_dds_top (
     wire        uart_activity;
     wire v2_frame_ok_toggle_sys;
     wire mix0_cfg_toggle_sys, mix1_cfg_toggle_sys;
+    wire mix_commit_toggle_sys;
+    wire [1:0] mix_commit_mask_sys;
+    wire [3:0] mix_commit_flags_sys;
+    wire mix_commit_applied_sys;
     wire [7:0] mix0_type_sys, mix1_type_sys;
     wire [127:0] mix0_ftw_sys, mix0_phase_sys;
     wire [127:0] mix1_ftw_sys, mix1_phase_sys;
@@ -65,6 +69,9 @@ module ad9744_dds_top (
         .uart_tx(mcu_uart_txd), .activity(uart_activity),
         .frame_ok_toggle(v2_frame_ok_toggle_sys),
         .cfg0_toggle(mix0_cfg_toggle_sys), .cfg1_toggle(mix1_cfg_toggle_sys),
+        .commit_toggle(mix_commit_toggle_sys),
+        .commit_mask(mix_commit_mask_sys), .commit_flags(mix_commit_flags_sys),
+        .commit_applied_toggle(mix_commit_applied_sys),
         .type0_flat(mix0_type_sys), .ftw0_flat(mix0_ftw_sys),
         .phase0_flat(mix0_phase_sys), .amp0_flat(mix0_amp_sys),
         .duty0_flat(mix0_duty_sys), .offset0(mix0_offset_sys),
@@ -99,8 +106,9 @@ module ad9744_dds_top (
     end
     assign sample_rst_n = reset_sync[1];
 
-    (* ASYNC_REG = "TRUE" *) reg [2:0] mix_toggle_sync;
-    (* ASYNC_REG = "TRUE" *) reg [2:0] mix1_toggle_sync;
+    // 两个DAC共享一个提交令牌。单一同步链保证双通道配置只能在同一个
+    // 100 MHz采样边沿切换，避免两条独立同步链带来一拍的不确定差异。
+    (* ASYNC_REG = "TRUE" *) reg [2:0] mix_commit_sync;
     reg [7:0] mix_type;
     reg [127:0] mix_ftw, mix_phase;
     reg [55:0] mix_amp;
@@ -109,7 +117,8 @@ module ad9744_dds_top (
     reg mix_cache_mode;
     reg [12:0] mix_cache_points;
     reg mix_enable;
-    reg mix_restart;
+    reg mix_update;
+    reg mix_phase_reset;
     reg [7:0] mix1_type;
     reg [127:0] mix1_ftw, mix1_phase;
     reg [55:0] mix1_amp;
@@ -118,13 +127,17 @@ module ad9744_dds_top (
     reg mix1_cache_mode;
     reg [12:0] mix1_cache_points;
     reg mix1_enable;
-    reg mix1_restart;
+    reg mix1_update;
+    reg mix1_phase_reset;
+    reg mix_commit_applied_sample;
     always @(posedge sample_clk or negedge sample_rst_n) begin
         if (!sample_rst_n) begin
-            mix_toggle_sync <= 3'b000;
-            mix1_toggle_sync <= 3'b000;
-            mix_restart <= 1'b0;
-            mix1_restart <= 1'b0;
+            mix_commit_sync <= 3'b000;
+            mix_update <= 1'b0;
+            mix_phase_reset <= 1'b0;
+            mix1_update <= 1'b0;
+            mix1_phase_reset <= 1'b0;
+            mix_commit_applied_sample <= 1'b0;
             // 上电诊断默认值：槽位0输出1 MHz满幅三角波，其余槽位关闭。
             mix_type <= 8'h02;
             mix_ftw <= {96'd0,32'd42_949_673};
@@ -146,68 +159,94 @@ module ad9744_dds_top (
             mix1_cache_points <= 13'd0;
             mix1_enable <= 1'b1;
         end else begin
-            mix_toggle_sync <= {mix_toggle_sync[1:0],mix0_cfg_toggle_sys};
-            mix1_toggle_sync <= {mix1_toggle_sync[1:0],mix1_cfg_toggle_sys};
-            mix_restart <= 1'b0;
-            mix1_restart <= 1'b0;
-            if (mix_toggle_sync[2] != mix_toggle_sync[1]) begin
+            mix_commit_sync <= {mix_commit_sync[1:0],mix_commit_toggle_sys};
+            mix_update <= 1'b0;
+            mix_phase_reset <= 1'b0;
+            mix1_update <= 1'b0;
+            mix1_phase_reset <= 1'b0;
+            if (mix_commit_sync[2] != mix_commit_sync[1]) begin
+                // commit_flags.bit0只在显式同步启动时清零相位；普通0x08/0x0A
+                // 提交仅切换参数，连续相位累加器继续运行。
+                if (mix_commit_mask_sys[0]) begin
                 mix_type <= mix0_type_sys; mix_ftw <= mix0_ftw_sys;
                 mix_phase <= mix0_phase_sys; mix_amp <= mix0_amp_sys;
                 mix_duty <= mix0_duty_sys; mix_offset <= mix0_offset_sys;
                 mix_cache_mode <= mix0_cache_mode_sys;
                 mix_cache_points <= mix0_cache_points_sys;
                 mix_enable <= mix0_enable_sys;
-                // 新配置提交后四个槽位从共同零相位同步启动。
-                mix_restart <= 1'b1;
-            end
-            if (mix1_toggle_sync[2] != mix1_toggle_sync[1]) begin
+                    mix_update <= 1'b1;
+                    mix_phase_reset <= mix_commit_flags_sys[0];
+                end
+                if (mix_commit_mask_sys[1]) begin
                 mix1_type <= mix1_type_sys; mix1_ftw <= mix1_ftw_sys;
                 mix1_phase <= mix1_phase_sys; mix1_amp <= mix1_amp_sys;
                 mix1_duty <= mix1_duty_sys; mix1_offset <= mix1_offset_sys;
                 mix1_cache_mode <= mix1_cache_mode_sys;
                 mix1_cache_points <= mix1_cache_points_sys;
                 mix1_enable <= mix1_enable_sys;
-                mix1_restart <= 1'b1;
+                    mix1_update <= 1'b1;
+                    mix1_phase_reset <= mix_commit_flags_sys[0];
+                end
+                mix_commit_applied_sample <= ~mix_commit_applied_sample;
             end
         end
     end
 
+    // 将采样域“已应用”翻转同步回UART域，ACK只在配置真正进入采样域后返回。
+    (* ASYNC_REG = "TRUE" *) reg [2:0] mix_commit_applied_sync;
+    always @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) mix_commit_applied_sync <= 3'b000;
+        else            mix_commit_applied_sync <= {mix_commit_applied_sync[1:0],
+                                                    mix_commit_applied_sample};
+    end
+    assign mix_commit_applied_sys = mix_commit_applied_sync[2];
+
     wire [13:0] mixed_dac_data;
+    (* MARK_DEBUG = "TRUE" *) wire mix_clipping;
+    (* MARK_DEBUG = "TRUE" *) wire [31:0] mix_clip_count;
     ad9744_multiwave_mixer u_multiwave_mixer (
         .clk(sample_clk), .rst_n(sample_rst_n),
-        .restart(mix_restart),
+        .restart(mix_phase_reset),
         .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
         .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
-        .dac_data(mixed_dac_data)
+        .dac_data(mixed_dac_data), .clipping(mix_clipping), .clip_count(mix_clip_count)
     );
 
     wire [13:0] cached_dac_data;
     wire cache_active;
+    (* MARK_DEBUG = "TRUE" *) wire cache_clipping;
+    (* MARK_DEBUG = "TRUE" *) wire [31:0] cache_clip_count;
     ad9744_period_cache u_period_cache (
-        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix_restart),
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix_update),
         .enable_request(mix_cache_mode), .period_points(mix_cache_points),
         .type_flat(mix_type), .ftw_flat(mix_ftw), .phase_flat(mix_phase),
         .amp_flat(mix_amp), .duty_flat(mix_duty), .dc_offset(mix_offset),
-        .cache_active(cache_active), .dac_data(cached_dac_data)
+        .cache_active(cache_active), .dac_data(cached_dac_data),
+        .clipping(cache_clipping), .clip_count(cache_clip_count)
     );
 
     // DAC2复用与DAC1相同的四槽实时混合器和双Bank周期缓存。
     wire [13:0] mixed_dac2_data;
+    (* MARK_DEBUG = "TRUE" *) wire mix1_clipping;
+    (* MARK_DEBUG = "TRUE" *) wire [31:0] mix1_clip_count;
     ad9744_multiwave_mixer u_multiwave_mixer_dac2 (
-        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_restart),
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_phase_reset),
         .type_flat(mix1_type), .ftw_flat(mix1_ftw), .phase_flat(mix1_phase),
         .amp_flat(mix1_amp), .duty_flat(mix1_duty), .dc_offset(mix1_offset),
-        .dac_data(mixed_dac2_data)
+        .dac_data(mixed_dac2_data), .clipping(mix1_clipping), .clip_count(mix1_clip_count)
     );
 
     wire [13:0] cached_dac2_data;
     wire cache2_active;
+    (* MARK_DEBUG = "TRUE" *) wire cache2_clipping;
+    (* MARK_DEBUG = "TRUE" *) wire [31:0] cache2_clip_count;
     ad9744_period_cache u_period_cache_dac2 (
-        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_restart),
+        .clk(sample_clk), .rst_n(sample_rst_n), .restart(mix1_update),
         .enable_request(mix1_cache_mode), .period_points(mix1_cache_points),
         .type_flat(mix1_type), .ftw_flat(mix1_ftw), .phase_flat(mix1_phase),
         .amp_flat(mix1_amp), .duty_flat(mix1_duty), .dc_offset(mix1_offset),
-        .cache_active(cache2_active), .dac_data(cached_dac2_data)
+        .cache_active(cache2_active), .dac_data(cached_dac2_data),
+        .clipping(cache2_clipping), .clip_count(cache2_clip_count)
     );
 
     // 更新翻转信号跨时钟域期间，多位配置总线保持稳定。

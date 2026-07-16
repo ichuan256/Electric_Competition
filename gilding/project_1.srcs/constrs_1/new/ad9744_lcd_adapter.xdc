@@ -67,3 +67,6 @@ set_false_path -from [get_ports mcu_uart_rxd]
 # 寄存器D端路径；mix_toggle_sync仍由ASYNC_REG同步链处理。
 set_false_path -to [get_pins -hierarchical -regexp \
     {.*(mix_type|mix_ftw|mix_phase|mix_amp|mix_duty|mix_offset|mix_cache_mode|mix_cache_points)_reg.*\/D}]
+# commit_flags同样采用“稳定数据+提交翻转”跨域，只在提交令牌完成两级同步后采样。
+set_false_path -to [get_pins -hierarchical -regexp \
+    {.*(mix_phase_reset|mix1_phase_reset)_reg.*\/D}]
