@@ -209,7 +209,7 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 | 4 | u8 | `generation_mode` | 0=AUTO，1=REALTIME，2=CACHE |
 | 5 | u8 | `component_count` | 0～4 |
 | 6 | u8 | `range_mode` | 0=AUTO，其余为标定量程编号 |
-| 7 | u8 | `stage_flags` | bit0 允许限幅，bit1 要求严格相位同步 |
+| 7 | u8 | `stage_flags` | bit0 允许限幅，bit1 要求严格相位同步，bit2 DDS 模拟通道存在直流偏置 |
 | 8 | i32 | `dc_offset_uunit` | CH1、CH2 均使用 µV |
 | 12 | u16 | `cache_points` | 0=Blue 自动计算，或 16～4096 |
 | 14 | u16 | `settle_us` | 提交后建议稳定等待时间 |
@@ -224,7 +224,7 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 | 2 | u16 | `component_flags` | bit0 enable，其余保留 |
 | 4 | u32 | `frequency_cHz` | 0.01 Hz；最大约 42.94967295 MHz |
 | 8 | i32 | `phase_mdeg` | -180000～+180000，Blue 归一化到一周 |
-| 12 | u32 | `amplitude_uunit_pp` | CH1、CH2 均使用 µVpp，范围 0～7000000 |
+| 12 | u32 | `amplitude_uunit_pp` | CH1、CH2 均使用 µVpp；当前标定工作范围 0～600000 |
 | 16 | u32 | `duty_ppm` | 1000～999000，仅方波使用 |
 
 波形枚举：
@@ -239,12 +239,11 @@ Black 负责用户意图；Blue 负责标定、量程选择以及把物理量换
 
 幅值界面与数字码换算：
 
-- 屏幕 `AMP(mV)` 输入的是波形峰值，范围 0～3500 mV；对应单分量最大 7 Vpp。
-- Black 按 `amplitude_code=floor(AMP_mV*8191/3500)` 生成发给 FPGA 的幅值码。
-- Black→Blue 仍保持 `amplitude_uunit_pp` 的 µVpp 语义，按
-  `round(amplitude_code*7000000/8191)` 传输；Blue 必须直接使用 µVpp 反算，
-  不得先截断到整数 mV。
-- Blue→FPGA 的 `amplitude_code` 保持 0～8191，8191 对应单分量峰值 3500 mV。
+- 内部标定基准仍是加法器输出端（未经过末级可调放大器）的 0～600 mVpp。CH1 屏幕按最终电压显示为 `VPP(mV)` 0～20000，满量程时将后级手调至 20 Vpp；CH2 屏幕按 5 Ω 负载电流显示为 `IPP(mA)` 0～250，满量程时将后级手调至负载两端 1.25 Vpp（即 0.25 App）。
+- Black 使用 0～8191 保存 0～600 mVpp 的用户目标，并通过 `amplitude_uunit_pp` 以 µVpp 发送给 Blue。
+- Blue 根据实测增益分别换算 DAC1、DAC2 的 FPGA 幅值码：DAC1 满码外推为 8.816320 Vpp，DAC2 满码外推为 8.223814 Vpp；两通道不得共用换算常量。
+- DDS 按实测 0.9567 增益修正 ASF 命令。末级 3.64 倍及手调增益不纳入本协议标定。
+- `dc_offset_uunit` 表示用户希望在加法器输出端得到的物理偏置。Blue 先按通道斜率换算，再在 `stage_flags.bit2=1` 时叠加 DDS 约 0.5 V 固有偏置的抵消码。
 
 参数规则：
 
@@ -318,6 +317,10 @@ Blue 必须完成以下顺序：
 | 8 | u32 | `phase_word`，`round(phase * 2^32 / 360°)` |
 | 12 | u16 | `amplitude_code`，0～8191；8191 对应单分量峰值 3500 mV |
 | 14 | u16 | `duty_code`，0～65535 |
+
+由于当前 FPGA 方波高低电平定义与界面占空比方向相反，Blue 在发送该字段时统一执行
+`fpga_duty_code = 65535 - ui_duty_code`，等价于发送 `100% - 框内占空比`。
+Black 的输入值、通道记忆和 Blue 的屏幕显示均保持用户输入值，不进行反向显示。
 
 与现有 FPGA 实现相比必须完成的改动：
 

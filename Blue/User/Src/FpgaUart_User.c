@@ -1,4 +1,5 @@
 #include "FpgaUart_User.h"
+#include "SpectrumCalibration_User.h"
 
 #include <string.h>
 #include "usart.h"
@@ -514,6 +515,7 @@ void FpgaUart_SetMultiwaveTransaction(uint16_t transaction_id,
   stage[pos++] = ((control_flags & FPGA_UART_CONTROL_CACHE) != 0U) ? 2U : 1U;
   stage[pos++] = wave_count;
   for (uint8_t i = 0U; i < wave_count; i++) { enabled |= waves[i].enable; }
+  if (offset_code != 0) { enabled = 1U; }
   stage[pos++] = (uint8_t)(0x02U | ((enabled != 0U) ? 0x01U : 0U));
   FpgaUart_WriteU16(stage, &pos, (uint16_t)offset_code);
   FpgaUart_WriteU16(stage, &pos, period_points);
@@ -528,7 +530,8 @@ void FpgaUart_SetMultiwaveTransaction(uint16_t transaction_id,
     FpgaUart_WriteU32(stage, &pos, FpgaUart_FrequencyToFtw(wave->frequency_hz));
     FpgaUart_WriteU32(stage, &pos, FpgaUart_PhaseToWord(wave->phase_deg));
     FpgaUart_WriteU16(stage, &pos, amplitude);
-    FpgaUart_WriteU16(stage, &pos, wave->duty_code);
+    FpgaUart_WriteU16(stage, &pos,
+                      SpectrumCalibration_DutyCodeToFpga(wave->duty_code));
   }
 
   if (FpgaUart_QueueV2Frame(FPGA_UART_CMD_CHANNEL_STAGE, stage, pos) == 0U)
@@ -559,7 +562,7 @@ void FpgaUart_SetMultiwave(uint8_t target, uint8_t wave_count,
 {
   FpgaUart_SetMultiwaveTransaction(fpga_uart_local_transaction++, target, wave_count,
                                    waves, offset_code, control_flags, period_points,
-                                   0x09U);
+                                   0x08U);
 }
 
 void FpgaUart_SetSignal(uint8_t channel_id, uint32_t frequency_hz, uint16_t phase_deg,

@@ -7,6 +7,7 @@
 #include "FpgaUart_User.h"
 #include "LcrAuto_User.h"
 #include "LcrDualAdc_User.h"
+#include "SpectrumCalibration_User.h"
 #include "lcd.h"
 #include "led.h"
 
@@ -26,9 +27,6 @@
 #define DISPLAY_FPGA_SAMPLE_HZ    100000000UL
 #define DISPLAY_FPGA_POINTS_MIN   16UL
 #define DISPLAY_FPGA_POINTS_MAX   4096UL
-#define DISPLAY_AMPLITUDE_CODE_MAX 8191U
-#define DISPLAY_AMPLITUDE_PEAK_MAX_MV 3500UL
-#define DISPLAY_OUTPUT_FULL_SCALE_UVPP 7000000ULL
 
 static SpectrumDisplayState display_state;
 static uint32_t display_last_rx_count = 0UL;
@@ -53,7 +51,9 @@ typedef struct {
   uint8_t channel_id;
   uint8_t wave_count;
   uint8_t generation_mode;
+  uint8_t source_flags;
   uint16_t cache_points;
+  int16_t user_bias_mv;
   int16_t offset_code;
   FpgaUartWaveConfig waves[SPECTRUM_DISPLAY_SUM_MAX_WAVES];
 } SpectrumSourceStage;
@@ -83,30 +83,6 @@ static uint32_t Spectrum_ReadU32(const uint8_t *buf, uint8_t *pos)
   value |= (uint32_t)buf[(uint8_t)(*pos + 3U)] << 24;
   *pos = (uint8_t)(*pos + 4U);
   return value;
-}
-
-static uint16_t Spectrum_AmplitudeUvppToCode(uint32_t amplitude_uvpp)
-{
-  if ((uint64_t)amplitude_uvpp > DISPLAY_OUTPUT_FULL_SCALE_UVPP)
-  {
-    amplitude_uvpp = (uint32_t)DISPLAY_OUTPUT_FULL_SCALE_UVPP;
-  }
-
-  return (uint16_t)((((uint64_t)amplitude_uvpp * DISPLAY_AMPLITUDE_CODE_MAX) +
-                     (DISPLAY_OUTPUT_FULL_SCALE_UVPP / 2ULL)) /
-                    DISPLAY_OUTPUT_FULL_SCALE_UVPP);
-}
-
-static uint32_t Spectrum_AmplitudeCodeToMv(uint16_t amplitude_code)
-{
-  if (amplitude_code > DISPLAY_AMPLITUDE_CODE_MAX)
-  {
-    amplitude_code = DISPLAY_AMPLITUDE_CODE_MAX;
-  }
-
-  return (uint32_t)((((uint64_t)amplitude_code * DISPLAY_AMPLITUDE_PEAK_MAX_MV) +
-                     (DISPLAY_AMPLITUDE_CODE_MAX / 2U)) /
-                    DISPLAY_AMPLITUDE_CODE_MAX);
 }
 
 uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
@@ -141,7 +117,8 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
     output_enable = data[pos++];
     generation_mode = data[pos++];
     count = data[pos++];
-    pos = (uint8_t)(pos + 2U);
+    pos++;
+    display_source_stage.source_flags = data[pos++];
     offset_uunit = (int32_t)Spectrum_ReadU32(data, &pos);
     display_source_stage.cache_points = Spectrum_ReadU16(data, &pos);
     pos = (uint8_t)(pos + 4U);
@@ -166,12 +143,15 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
     display_source_stage.channel_id = channel_id;
     display_source_stage.wave_count = count;
     display_source_stage.generation_mode = generation_mode;
-    offset_code = offset_uunit / 1000L;
-    if ((offset_code < -8192L) || (offset_code > 8191L))
+    offset_code = SpectrumCalibration_RoundDivSigned(offset_uunit, 1000L);
+    if ((offset_code < -32768L) || (offset_code > 32767L) ||
+        (SpectrumCalibration_CalculateOffsetCode(
+             channel_id, offset_uunit, display_source_stage.source_flags,
+             &display_source_stage.offset_code) == 0U))
     {
       return 0x07U;
     }
-    display_source_stage.offset_code = (int16_t)offset_code;
+    display_source_stage.user_bias_mv = (int16_t)offset_code;
     display_source_stage.valid = 0U;
 
     for (uint8_t i = 0U; i < count; i++)
@@ -191,7 +171,7 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
         return 0x06U;
       }
       slot_mask |= (uint8_t)(1U << slot);
-      if (((uint64_t)amplitude_uunit > DISPLAY_OUTPUT_FULL_SCALE_UVPP) ||
+      if (amplitude_uunit > SPECTRUM_CAL_TARGET_MAX_UVPP ||
           (duty_ppm > 999000UL) ||
           ((waveform == 2U) && (duty_ppm < 1000UL)))
       {
@@ -205,7 +185,8 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
         phase_mdeg += 360000L;
       }
       wave->phase_deg = (uint16_t)((phase_mdeg + 500L) / 1000L);
-      wave->amplitude_code = Spectrum_AmplitudeUvppToCode(amplitude_uunit);
+      wave->amplitude_code = SpectrumCalibration_AmplitudeUvppToCode(
+          channel_id, amplitude_uunit);
       wave->duty_code = (uint16_t)((((duty_ppm / 1000UL) * 65535UL) + 500UL) / 1000UL);
       wave->offset_code = 0;
       wave->waveform = (waveform == 0U) ? 0U : (uint8_t)(waveform - 1U);
@@ -257,7 +238,7 @@ uint8_t SpectrumDisplay_HandleSourceFrame(uint8_t cmd, const uint8_t *data,
         display_source_last_applied_mask = channel_mask;
         display_state.channel_id = display_source_stage.channel_id;
         display_state.wave_count = display_source_stage.wave_count;
-        display_state.output_bias_mv = display_source_stage.offset_code;
+        display_state.output_bias_mv = display_source_stage.user_bias_mv;
         display_state.fpga_output_mode =
             (display_source_stage.generation_mode == 2U) ? 1U : 0U;
         display_state.apply_counter = (uint8_t)*transaction_id;
@@ -384,7 +365,7 @@ static const char *Spectrum_FieldName(uint8_t field)
     case 2U: return "WSEL";
     case 3U: return "FREQ";
     case 4U: return "PHASE";
-    case 5U: return "AMP(mV)";
+    case 5U: return (display_state.channel_id == 0U) ? "VPP(mV)" : "IPP(mA)";
     case 6U: return "OFFS";
     case 7U: return "DUTY";
     case 8U: return "WAVE";
@@ -434,8 +415,9 @@ static void Spectrum_FormatFieldValue(uint8_t field, char *text, uint8_t text_le
       snprintf(text, text_len, "%u", wave->phase_deg);
       break;
     case 5U:
-      snprintf(text, text_len, "%lumV",
-               (unsigned long)Spectrum_AmplitudeCodeToMv(wave->amplitude_code));
+      snprintf(text, text_len, (display_state.channel_id == 0U) ? "%lumV" : "%lumA",
+               (unsigned long)SpectrumCalibration_AmplitudeCodeToUiValue(
+                   display_state.channel_id, wave->amplitude_code));
       break;
     case 6U:
       snprintf(text, text_len, "%d", wave->offset_code);
@@ -492,7 +474,7 @@ static void Spectrum_FormatEditText(char *text, uint8_t text_len)
   }
   if ((display_state.ui_focus == 5U) && (len < (uint8_t)(text_len - 1U)))
   {
-    text[len++] = 'V';
+    text[len++] = (display_state.channel_id == 0U) ? 'V' : 'A';
   }
   text[len] = '\0';
 }
@@ -502,6 +484,7 @@ static void Spectrum_SendSumToFpga(void)
   FpgaUartWaveConfig waves[SPECTRUM_DISPLAY_SUM_MAX_WAVES];
   uint32_t period_points = 0UL;
   uint8_t control_flags = FPGA_UART_CONTROL_REALTIME;
+  int16_t calibrated_offset_code;
   uint8_t i;
 
   for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
@@ -533,10 +516,19 @@ static void Spectrum_SendSumToFpga(void)
     }
   }
 
+  if (SpectrumCalibration_CalculateOffsetCode(
+          display_state.channel_id,
+          (int32_t)display_state.output_bias_mv * 1000L,
+          SPECTRUM_CAL_SOURCE_FLAG_DDS_BIAS_PRESENT,
+          &calibrated_offset_code) == 0U)
+  {
+    return;
+  }
+
   FpgaUart_SetMultiwave(display_state.channel_id,
                         display_state.wave_count,
                         waves,
-                        display_state.output_bias_mv,
+                        calibrated_offset_code,
                         control_flags,
                         (uint16_t)period_points);
 }
@@ -605,7 +597,8 @@ static void Spectrum_LoadDefaults(void)
   {
     display_state.waves[i].frequency_hz = 1000000UL + (uint32_t)i * 100000UL;
     display_state.waves[i].phase_deg = 0U;
-    display_state.waves[i].amplitude_code = (i < 2U) ? 2048U : 0U;
+    display_state.waves[i].amplitude_code = (i < 2U) ?
+        SpectrumCalibration_AmplitudeUvppToCode(0U, 500000UL) : 0U;
     display_state.waves[i].offset_code = 0;
     display_state.waves[i].duty_code = 32768U;
     display_state.waves[i].waveform = (i < 2U) ? 1U : 0U;
@@ -677,7 +670,9 @@ static void Spectrum_DrawTable(void)
            (uint16_t)(DISPLAY_TABLE_X + DISPLAY_TABLE_W - 1U),
            (uint16_t)(DISPLAY_TABLE_Y + DISPLAY_TABLE_ROW_H - 1U), LGRAY);
   lcd_show_string(14U, 160U, 452U, 16U, 16U,
-                  "#  EN TYPE  FREQ       PHASE AMP(mV) OFFS DUTY", BLACK);
+                  (display_state.channel_id == 0U) ?
+                  "#  EN TYPE  FREQ       PHASE VPP(mV) OFFS DUTY" :
+                  "#  EN TYPE  FREQ       PHASE IPP(mA) OFFS DUTY", BLACK);
 
   for (i = 0U; i < SPECTRUM_DISPLAY_SUM_MAX_WAVES; i++)
   {
@@ -698,7 +693,8 @@ static void Spectrum_DrawTable(void)
              Spectrum_WaveText(display_state.waves[i].waveform),
              freq,
              display_state.waves[i].phase_deg,
-             (unsigned long)Spectrum_AmplitudeCodeToMv(display_state.waves[i].amplitude_code),
+             (unsigned long)SpectrumCalibration_AmplitudeCodeToUiValue(
+                 display_state.channel_id, display_state.waves[i].amplitude_code),
              display_state.waves[i].offset_code,
              ((uint32_t)display_state.waves[i].duty_code * 100UL + 32767UL) / 65535UL);
     lcd_show_string(14U, (uint16_t)(y + 5U), 452U, 16U, 16U, line, color);
