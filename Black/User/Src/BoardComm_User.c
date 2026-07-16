@@ -1,26 +1,13 @@
 #include "BoardComm_User.h"
-#include "AdcFftClient_User.h"
 
-/*
- * 本模块当前使用的 UART 句柄。
- * 默认绑定 USART3，也就是 CubeMX 生成的 huart3。
- */
+/* Black 与 Blue 的板间通信固定使用 USART3，并且只解析统一 V2 帧。 */
+
 static UART_HandleTypeDef *board_comm_uart = &huart3;
 static uint16_t board_comm_tx_seq = 1U;
 static uint8_t board_comm_tx_buf[BOARD_COMM_RX_BUF_SIZE];
 
-/*
- * USART3 空闲中断接收缓冲区。
- *
- * 为什么必须是 static 全局数组：
- *   HAL_UARTEx_ReceiveToIdle_IT() 启动后，HAL 会在中断中持续向该缓冲区写入。
- *   如果使用局部变量，函数退出后内存失效，接收会出错。
- */
-static uint8_t board_comm_rx_buf[BOARD_COMM_RX_BUF_SIZE];
 
-#define BOARD_COMM_ADC_FFT_HEADER_LEN     9U
-#define BOARD_COMM_ADC_FFT_OVERHEAD       13U
-#define BOARD_COMM_ADC_FFT_MAX_FRAME_LEN  49U
+static uint8_t board_comm_rx_buf[BOARD_COMM_RX_BUF_SIZE];
 
 typedef enum {
   BOARD_COMM_FRAME_NO_MATCH = 0,
@@ -39,15 +26,7 @@ typedef struct {
   BoardComm_FrameDispatch dispatch;
 } BoardComm_FrameDecoder;
 
-/*
- * 计算协议校验字节。
- *
- * 校验规则：
- *   CHECKSUM = CMD ^ LEN ^ DATA[0] ^ DATA[1] ^ ...
- *
- * 这种异或校验计算简单，方便用串口助手手工验证。若后续通信环境干扰较强，
- * 可以把这里升级为 CRC8 或 CRC16，但收发双方必须同时修改。
- */
+
 static uint16_t BoardComm_Crc16(const uint8_t *data, uint16_t len)
 {
   uint16_t crc = 0xFFFFU;
@@ -65,24 +44,7 @@ static uint16_t BoardComm_Crc16(const uint8_t *data, uint16_t len)
   return crc;
 }
 
-/*
- * 解析一帧原始字节。
- *
- * 输入：
- *   frame - 原始接收缓冲区，格式应为 A5 5A CMD LEN DATA... CHECKSUM。
- *   size  - 本次空闲中断实际收到的字节数。
- *
- * 输出：
- *   cmd  - 命令字。
- *   data - 数据区指针，直接指向 frame 内部。
- *   len  - 数据区长度。
- *
- * 返回：
- *   BOARD_COMM_OK              帧合法。
- *   BOARD_COMM_ERROR           帧头错误或参数错误。
- *   BOARD_COMM_LENGTH_ERROR    长度错误、半包或粘包。
- *   BOARD_COMM_CHECKSUM_ERROR  校验错误。
- */
+
 static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size,
                                              uint8_t *cmd, const uint8_t **data, uint8_t *len)
 {
@@ -94,19 +56,16 @@ static BoardComm_Status BoardComm_ParseFrame(const uint8_t *frame, uint16_t size
     return BOARD_COMM_ERROR;
   }
 
-  /* 最短帧为：A5 5A CMD LEN CHECKSUM，共 5 字节。 */
   if (size < BOARD_COMM_FRAME_OVERHEAD)
   {
     return BOARD_COMM_LENGTH_ERROR;
   }
 
-  /* 校验帧头，确认这确实是一帧板间通信数据。 */
   if ((frame[0] != BOARD_COMM_HEAD1) || (frame[1] != BOARD_COMM_HEAD2))
   {
     return BOARD_COMM_ERROR;
   }
 
-  /* LEN 不能超过协议允许的最大数据区长度。 */
   if (frame[2] != BOARD_COMM_VERSION)
   {
     return BOARD_COMM_ERROR;
@@ -181,59 +140,18 @@ static void BoardComm_DispatchStandardFrame(const uint8_t *frame, uint16_t frame
   BoardComm_RxFrameCallback(cmd, data, len, status);
 }
 
-static BoardComm_FrameProbeResult BoardComm_ProbeAdcFftFrame(const uint8_t *data,
-                                                              uint16_t available,
-                                                              uint16_t *frame_size)
-{
-  uint16_t payload_len;
-
-  if (AdcFftClient_IsFrameStart(data, available) == 0U)
-  {
-    return BOARD_COMM_FRAME_NO_MATCH;
-  }
-  if (available < BOARD_COMM_ADC_FFT_HEADER_LEN)
-  {
-    return BOARD_COMM_FRAME_INCOMPLETE;
-  }
-
-  payload_len = (uint16_t)data[7] | ((uint16_t)data[8] << 8);
-  *frame_size = (uint16_t)(BOARD_COMM_ADC_FFT_OVERHEAD + payload_len);
-  if (*frame_size > BOARD_COMM_ADC_FFT_MAX_FRAME_LEN)
-  {
-    return BOARD_COMM_FRAME_INVALID;
-  }
-  return (*frame_size <= available) ? BOARD_COMM_FRAME_READY : BOARD_COMM_FRAME_INCOMPLETE;
-}
-
-static void BoardComm_DispatchAdcFftFrame(const uint8_t *frame, uint16_t frame_size)
-{
-  (void)AdcFftClient_HandleRxBuffer(frame, frame_size);
-}
-
 static const BoardComm_FrameDecoder board_comm_frame_decoders[] = {
-  {BoardComm_ProbeStandardFrame, BoardComm_DispatchStandardFrame},
-  {BoardComm_ProbeAdcFftFrame, BoardComm_DispatchAdcFftFrame}
+  {BoardComm_ProbeStandardFrame, BoardComm_DispatchStandardFrame}
 };
 
-/*
- * 初始化板间通信模块。
- * 这里只绑定 UART 句柄，不重复初始化 USART3 硬件。
- * USART3 的 GPIO、时钟、波特率由 MX_USART3_UART_Init() 完成。
- */
+
 void BoardComm_Init(void)
 {
   board_comm_uart = &huart3;
   board_comm_tx_seq = 1U;
 }
 
-/*
- * 启动接收到空闲中断。
- *
- * 调用后，HAL 会开始接收 USART3 数据。出现以下情况之一会触发
- * HAL_UARTEx_RxEventCallback()：
- *   1. 缓冲区接收满。
- *   2. 收到若干字节后，串口线路进入 IDLE 空闲状态。
- */
+
 BoardComm_Status BoardComm_StartReceiveToIdleIT(void)
 {
   if (board_comm_uart == 0)
@@ -249,10 +167,7 @@ BoardComm_Status BoardComm_StartReceiveToIdleIT(void)
   return BOARD_COMM_OK;
 }
 
-/*
- * 停止当前中断接收。
- * 一般不用主动调用，除非要临时关闭板间通信或切换到其他接收方式。
- */
+
 BoardComm_Status BoardComm_StopReceiveIT(void)
 {
   if (board_comm_uart == 0)
@@ -268,16 +183,7 @@ BoardComm_Status BoardComm_StopReceiveIT(void)
   return BOARD_COMM_OK;
 }
 
-/*
- * 空闲中断接收事件处理。
- *
- * 这个函数会在 HAL_UARTEx_RxEventCallback() 中被调用。
- * 它负责：
- *   1. 判断是不是 USART3 的接收事件。
- *   2. 解析接收缓冲区中的协议帧。
- *   3. 调用用户回调 BoardComm_RxFrameCallback()。
- *   4. 重新启动下一次空闲中断接收。
- */
+
 void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
 {
   uint16_t offset = 0U;
@@ -327,34 +233,17 @@ void BoardComm_HandleRxIdleEvent(UART_HandleTypeDef *huart, uint16_t size)
     }
   }
 
-  /*
-   * ReceiveToIdle 每触发一次事件，本轮接收就结束。
-   * 必须重新启动一次，才能继续接收下一帧数据。
-   */
+  /* ReceiveToIdle 每次回调后都要重新启动。 */
   (void)BoardComm_StartReceiveToIdleIT();
 }
 
-/*
- * HAL 接收到空闲事件回调。
- *
- * 因为当前工程 USE_HAL_UART_REGISTER_CALLBACKS = 0，所以不能动态注册回调，
- * 需要直接实现 HAL 的弱回调函数。HAL_UART_IRQHandler() 处理到 IDLE 事件后，
- * 会进入这里。
- */
+
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
   BoardComm_HandleRxIdleEvent(huart, Size);
 }
 
-/*
- * 用户接收回调的默认实现。
- *
- * 这是一个弱函数，默认什么都不做。后续需要处理接收到的数据时，在其他
- * 用户 .c 文件中写一个同名函数即可覆盖它。
- *
- * 中断注意事项：
- *   该函数在中断上下文中执行，不要 HAL_Delay，不要 printf，不要做长时间运算。
- */
+
 __weak void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t len, BoardComm_Status status)
 {
   (void)cmd;
@@ -363,12 +252,7 @@ __weak void BoardComm_RxFrameCallback(uint8_t cmd, const uint8_t *data, uint8_t 
   (void)status;
 }
 
-/*
- * 阻塞式发送一帧数据。
- *
- * 帧格式：
- *   A5 5A CMD LEN DATA... CHECKSUM
- */
+
 BoardComm_Status BoardComm_Send(uint8_t cmd, const uint8_t *data, uint8_t len)
 {
   uint16_t seq = board_comm_tx_seq++;
@@ -424,12 +308,7 @@ BoardComm_Status BoardComm_SendV2(uint8_t dst, uint8_t cmd, uint8_t flags,
   return BOARD_COMM_OK;
 }
 
-/*
- * 阻塞式接收一帧数据。
- *
- * 该函数会一直等待指定字节数，直到接收完成或 timeout 超时。
- * 现在已经加入空闲中断接收，因此这个函数主要用于早期调试或临时测试。
- */
+
 BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, uint32_t timeout)
 {
   uint8_t header[11];
@@ -497,10 +376,7 @@ BoardComm_Status BoardComm_Receive(uint8_t *cmd, uint8_t *data, uint8_t *len, ui
   return BOARD_COMM_OK;
 }
 
-/*
- * 发送 PING 命令。
- * 当前约定 0x01 表示 PING，用来检查板间串口是否连通。
- */
+
 BoardComm_Status BoardComm_SendRaw(const uint8_t *frame, uint16_t len, uint32_t timeout)
 {
   if ((board_comm_uart == 0) || (frame == 0) || (len == 0U))

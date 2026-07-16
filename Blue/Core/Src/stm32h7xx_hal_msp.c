@@ -85,8 +85,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     __HAL_RCC_ADC12_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
 
-    /* PC0 -> ADC1_INP10.
-       The log detector output must be limited to 0..3.3 V. */
+    /* PC0 -> ADC1_INP10, LCR Vin input. Keep the input within 0..3.3 V. */
     GPIO_InitStruct.Pin = GPIO_PIN_0;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
