@@ -1,0 +1,3 @@
+# Vivado may create a private Tcl app store when HOME is redirected locally.
+/2025.2/
+/tclapp/
