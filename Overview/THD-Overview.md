@@ -957,3 +957,12 @@ FTW     = round_u64(fundamental_millihz * 2^32, DAC_CLK_HZ * 1000)
 - Blue 已实现 UART4（PA0 TX、PA1 RX，115200 8N1）、DMA1 Stream3 循环接收和 PC13 STATE 接口。当前已恢复正式模式：PC13/STATE 稳定低到高时单次发送 HELLO，只有正确接收并校验 Red ACK 后才显示绿色 `CONNECTED`；STATE 持续为高时不重复发送。
 - Red 已在 LAUNCHXL-F28379D CPU1 Driverlib 工程实现 SCI-B（GPIO18 TX、GPIO19 RX，115200 8N1）RX FIFO中断加256项环形缓冲区接收、HELLO 校验和带校验位图的 ACK 回复。
 - Blue 原 USART1 仍归 `BoardComm_User` 使用，USART2 仍归 `FpgaUart_User` 使用；新模块不注册它们的中断、DMA 或回调，未覆盖旧串口所有权。
+
+## 13. Red 向 MSPM0G3507 迁移（2026-07-20）
+
+- Red 控制器决定改用 `MSPM0G3507`，迁移工程改用 Keil MDK/ARMCLANG；原 `LAUNCHXL-F28379D` 的 `Red` 工程保留，不在迁移阶段覆盖或删除。
+- 当前新建的 `M0_Red` 仅用于先调通 Blue-Red 蓝牙握手，不视为最终整机 Red 工程。握手稳定后，再新建完整的 M0 Red 工程并集成已有的其他模块代码。
+- 第一阶段保持既有 HELLO、ACK、CRC16、节点/版本/载荷检查及校验位图不变，避免同时更换主控和通信协议造成问题无法定位。
+- M0 Red 蓝牙口固定为 UART0：`PA10/TX`、`PA11/RX`、115200、8N1；接收采用 UART RX 中断立即搬运到 256 字节软件环形缓冲区，主循环只做协议解析，禁止改回接收寄存器轮询。
+- M0 Red 调试保留原始接收抓取数组、接收字节计数及环形缓冲区溢出计数，以便先验证物理层字节是否正确，再检查帧解析和应答。
+- M0 Red 及后续工程的 Debug/迁移验证配置统一使用 `O0` 优化等级。

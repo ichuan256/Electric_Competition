@@ -228,7 +228,7 @@ void ThdBluetoothLink_init(void)
 
 void ThdBluetoothLink_task(void)
 {
-    while(rx_ring_read != rx_ring_write) {
+    while( rx_ring_read != rx_ring_write) {
         uint16_t value = rx_ring[rx_ring_read];
         rx_ring_read = (rx_ring_read + 1U) & LINK_RX_RING_MASK;
         parseByte(value);
