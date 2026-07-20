@@ -1,0 +1,31 @@
+{
+  // 使用 IntelliSense 了解相关属性。 
+  // 悬停以查看现有属性的描述。
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CCS Debug",
+      "type": "ccs-debug",
+      "request": "launch",
+      "launchSettings": {
+        "coresToLoadForProjectLaunch": [
+          "C28xx_CPU1"
+        ]
+      }
+    },
+    {
+      "name": "Red",
+      "type": "ccs-debug",
+      "request": "launch",
+      "projectInfo": {
+        "name": "Red",
+        "resourceId": "/Red"
+      },
+      "launchSettings": {
+        "coresToLoadForProjectLaunch": [
+          "C28xx_CPU1"
+        ]
+      }
+    }
+  ]
+}

@@ -38,6 +38,7 @@
 #include "SpectrumDisplay_User.h"
 #include "AGC_DAC_User.h"
 #include "FpgaUart_User.h"
+#include "BluetoothLink_User.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -191,7 +192,7 @@ int main(void)
 	
 	/* Target AGC output is 1 V; the fitted transfer function sets PA5 to about 2.034 V. */
 	AGC_DAC_SetTargetOutputMv(1000.0f);
-  SpectrumDisplay_Init();
+  BluetoothLink_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -207,7 +208,7 @@ int main(void)
     LcrCalibration_UsbTask();
     UsbCdc_Task();
     FpgaUart_Task();
-    SpectrumDisplay_Task();
+    BluetoothLink_Task();
     HAL_Delay(10);
   }
   /* USER CODE END 3 */

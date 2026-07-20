@@ -1,0 +1,32 @@
+[
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1 -xc",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg/board.c"
+   },
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1 -xc",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg/c2000ware_libraries.c"
+   },
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/device/F2837xD_CodeStartBranch.asm"
+   },
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1 -xc",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/device/device.c"
+   },
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1 -xc",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/empty_driverlib_main.c"
+   },
+   {
+      "directory" : "D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM",
+      "command"   : "clang++ -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red\" -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/device\" -I\"C:/ti/c2000/C2000Ware_26_01_00_00/driverlib/f2837xd/driverlib/\" -I\"D:/CCS/ccs/tools/compiler/ti-cgt-c2000_25.11.1.LTS/include\" -DDEBUG -DCPU1 -I\"D:/CaoTX/Electric Competition/Project/Stage2/Red/CPU1_RAM/syscfg\" -DF2837xD=1 -xc",
+      "file"      : "D:/CaoTX/Electric Competition/Project/Stage2/Red/thd_bluetooth_link.c"
+   }
+]
